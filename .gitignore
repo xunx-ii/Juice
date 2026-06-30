@@ -11,11 +11,12 @@ node_modules
 dist
 dist-ssr
 *.local
-src-tauri/target
-src-tauri/gen
-src-tauri/.tauri
-src-tauri/**/*.sqlite
-src-tauri/**/img
+orange-notes/src-tauri/target
+orange-notes/src-tauri/gen
+orange-notes/src-tauri/.tauri
+orange-notes/src-tauri/**/*.sqlite
+orange-notes/src-tauri/**/img
+orange-notes/src-tauri/target/*
 
 # Editor directories and files
 .vscode/*
