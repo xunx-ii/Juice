@@ -1,9 +1,8 @@
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use serde::Serialize;
 use tokio::sync::Mutex;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Folder {
     pub id: String,
     pub name: String,
@@ -12,7 +11,7 @@ pub struct Folder {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Note {
     pub id: String,
     pub title: String,
@@ -25,7 +24,7 @@ pub struct Note {
     pub favorite: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct NotebookState {
     pub folders: Vec<Folder>,
     pub notes: Vec<Note>,
@@ -33,7 +32,7 @@ pub struct NotebookState {
     pub version: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct DeletedChange {
     pub entity_type: String,
     pub id: String,
@@ -49,7 +48,7 @@ impl Database {
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-        let conn = Connection::open_with_path(path, flags)?;
+        let conn = Connection::open_with_flags(path, flags)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "TRUE")?;
         init_schema(&conn)?;
@@ -139,8 +138,8 @@ impl Database {
         }).await
     }
 
-    pub async fn upsert_folder(&self, folder: &Folder) -> Result<(), rusqlite::Error> {
-        self.conn(|conn| {
+    pub async fn upsert_folder(&self, folder: Folder) -> Result<(), rusqlite::Error> {
+        self.conn(move |conn| {
             conn.execute(
                 "INSERT INTO folders (id, name, sort_order, parent_id, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)
@@ -161,8 +160,8 @@ impl Database {
         }).await
     }
 
-    pub async fn upsert_note(&self, note: &Note) -> Result<(), rusqlite::Error> {
-        self.conn(|conn| {
+    pub async fn upsert_note(&self, note: Note) -> Result<(), rusqlite::Error> {
+        self.conn(move |conn| {
             conn.execute(
                 "INSERT INTO notes (id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -193,11 +192,11 @@ impl Database {
 
     pub async fn delete_entity(
         &self,
-        entity_type: &str,
-        id: &str,
+        entity_type: String,
+        id: String,
     ) -> Result<(), rusqlite::Error> {
-        self.conn(|conn| {
-            match entity_type {
+        self.conn(move |conn| {
+            match entity_type.as_str() {
                 "folder" => {
                     conn.execute("DELETE FROM notes WHERE folder = ?1", params![id])?;
                     conn.execute("DELETE FROM folders WHERE id = ?1", params![id])?;
@@ -216,8 +215,8 @@ impl Database {
         }).await
     }
 
-    pub async fn get_user_password_hash(&self, username: &str) -> Result<Option<String>, rusqlite::Error> {
-        self.conn(|conn| {
+    pub async fn get_user_password_hash(&self, username: String) -> Result<Option<String>, rusqlite::Error> {
+        self.conn(move |conn| {
             conn.query_row(
                 "SELECT password_hash FROM users WHERE username = ?1",
                 params![username],
@@ -226,8 +225,8 @@ impl Database {
         }).await
     }
 
-    pub async fn create_user(&self, username: &str, password_hash: &str) -> Result<(), rusqlite::Error> {
-        self.conn(|conn| {
+    pub async fn create_user(&self, username: String, password_hash: String) -> Result<(), rusqlite::Error> {
+        self.conn(move |conn| {
             conn.execute(
                 "INSERT OR IGNORE INTO users (username, password_hash) VALUES (?1, ?2)",
                 params![username, password_hash],

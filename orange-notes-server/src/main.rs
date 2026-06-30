@@ -1,5 +1,4 @@
 use axum::{
-    extract::Path,
     routing::get,
     Router,
 };

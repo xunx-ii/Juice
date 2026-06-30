@@ -7,10 +7,9 @@ use axum::{
     response::IntoResponse,
 };
 use std::sync::Arc;
-use tokio_tungstenite::tungstenite as ws2;
 
 use crate::auth;
-use crate::db::{Database, Folder, Note, NotebookState};
+use crate::db::{Database, NotebookState};
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "type")]
@@ -57,7 +56,7 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, username, database))
 }
 
-async fn handle_socket(mut socket: WebSocket, username: String, db: Arc<Database>) {
+async fn handle_socket(mut socket: WebSocket, _username: String, db: Arc<Database>) {
     let session_id = uuid::Uuid::new_v4().to_string();
     let _ = send(&mut socket, &ServerMessage::Welcome {
         session_id,
@@ -72,7 +71,7 @@ async fn handle_socket(mut socket: WebSocket, username: String, db: Arc<Database
                     Ok(client_message) => {
                         match client_message {
                             ClientMessage::Authenticate { username, password } => {
-                                match db.get_user_password_hash(&username).await {
+                                match db.get_user_password_hash(username.clone()).await {
                                     Ok(Some(hash)) => {
                                         if auth::verify_password(&password, hash.as_str()) {
                                             auth_success = true;
@@ -85,7 +84,7 @@ async fn handle_socket(mut socket: WebSocket, username: String, db: Arc<Database
                                         // Auto-create user if it doesn't exist yet.
                                         match auth::hash_password(&password) {
                                             Ok(hash) => {
-                                                match db.create_user(&username, &hash).await {
+                                                match db.create_user(username.clone(), hash).await {
                                                     Ok(_) => {
                                                         auth_success = true;
                                                         let _ = send(&mut socket, &ServerMessage::Authenticated).await;
@@ -176,19 +175,19 @@ async fn send(socket: &mut WebSocket, msg: &ServerMessage) -> Result<(), axum::E
 
 async fn apply_state(db: &Database, state: &NotebookState) -> Result<(), String> {
     for folder in &state.folders {
-        db.upsert_folder(folder)
+        db.upsert_folder(folder.clone())
             .await
             .map_err(|e| format!("upsert folder {}: {}", folder.id, e))?;
     }
 
     for note in &state.notes {
-        db.upsert_note(note)
+        db.upsert_note(note.clone())
             .await
             .map_err(|e| format!("upsert note {}: {}", note.id, e))?;
     }
 
     for deleted in &state.deleted {
-        db.delete_entity(&deleted.entity_type, &deleted.id)
+        db.delete_entity(deleted.entity_type.clone(), deleted.id.clone())
             .await
             .map_err(|e| format!("delete {} {}: {}", deleted.entity_type, deleted.id, e))?;
     }
