@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 argon2 = "0.5"
 axum = { version = "0.7", features = ["ws"] }
+percent-encoding = "2"
 chrono = { version = "0.4", features = ["serde"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

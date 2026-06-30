@@ -6,10 +6,61 @@ use axum::{
     },
     response::IntoResponse,
 };
+use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use crate::auth;
 use crate::db::{Database, NotebookState};
+
+#[derive(Clone, Serialize)]
+pub struct ClientInfo {
+    pub username: String,
+    pub connected_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AttachmentMeta {
+    pub file_name: String,
+    pub mime: String,
+}
+
+#[derive(Clone, Default)]
+pub struct ClientMap {
+    clients: Arc<Mutex<HashMap<String, ClientInfo>>>,
+}
+
+impl ClientMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn add(&self, session_id: String, info: ClientInfo) {
+        self.clients.lock().await.insert(session_id, info);
+    }
+
+    pub async fn remove(&self, session_id: &str) {
+        self.clients.lock().await.remove(session_id);
+    }
+
+    pub fn count(&self) -> usize {
+        // Best-effort count; if the lock is contended, skip.
+        if let Ok(guard) = self.clients.try_lock() {
+            guard.len()
+        } else {
+            0
+        }
+    }
+
+    pub fn list(&self) -> Vec<ClientInfo> {
+        if let Ok(guard) = self.clients.try_lock() {
+            guard.values().cloned().collect()
+        } else {
+            Vec::new()
+        }
+    }
+}
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "type")]
@@ -42,6 +93,7 @@ enum ServerMessage {
     },
     State {
         state: NotebookState,
+        attachments: Vec<AttachmentMeta>,
     },
     /// Sent when an authenticated user pushes new changes; other sessions
     /// of the same user receive this so they can load the latest state.
@@ -52,17 +104,25 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Path(username): Path<String>,
     State(database): State<Arc<Database>>,
+    State(clients): State<Arc<ClientMap>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, username, database))
+    ws.on_upgrade(move |socket| handle_socket(socket, username, database, clients))
 }
 
-async fn handle_socket(mut socket: WebSocket, _username: String, db: Arc<Database>) {
+async fn handle_socket(mut socket: WebSocket, username: String, db: Arc<Database>, clients: Arc<ClientMap>) {
     let session_id = uuid::Uuid::new_v4().to_string();
+    let connected_at = chrono::Utc::now().to_rfc3339();
+    clients.add(session_id.clone(), ClientInfo {
+        username: username.clone(),
+        connected_at,
+    }).await;
+
     let _ = send(&mut socket, &ServerMessage::Welcome {
-        session_id,
+        session_id: session_id.clone(),
     }).await;
 
     let mut auth_success = false;
+    let mut authenticated_user: Option<String> = None;
 
     while let Some(Ok(message)) = socket.recv().await {
         match message {
@@ -71,37 +131,26 @@ async fn handle_socket(mut socket: WebSocket, _username: String, db: Arc<Databas
                     Ok(client_message) => {
                         match client_message {
                             ClientMessage::Authenticate { username, password } => {
+                                // Only authenticate existing users — no auto-registration.
                                 match db.get_user_password_hash(username.clone()).await {
                                     Ok(Some(hash)) => {
                                         if auth::verify_password(&password, hash.as_str()) {
                                             auth_success = true;
+                                            authenticated_user = Some(username.clone());
+                                            clients.add(session_id.clone(), ClientInfo {
+                                                username: username.clone(),
+                                                connected_at: chrono::Utc::now().to_rfc3339(),
+                                            }).await;
                                             let _ = send(&mut socket, &ServerMessage::Authenticated).await;
                                         } else {
                                             let _ = send(&mut socket, &ServerMessage::AuthenticationFailed).await;
                                         }
                                     }
                                     Ok(None) => {
-                                        // Auto-create user if it doesn't exist yet.
-                                        match auth::hash_password(&password) {
-                                            Ok(hash) => {
-                                                match db.create_user(username.clone(), hash).await {
-                                                    Ok(_) => {
-                                                        auth_success = true;
-                                                        let _ = send(&mut socket, &ServerMessage::Authenticated).await;
-                                                    }
-                                                    Err(e) => {
-                                                        let _ = send(&mut socket, &ServerMessage::Error {
-                                                            message: format!("Failed to create user: {}", e),
-                                                        }).await;
-                                                    }
-                                                }
-                                            }
-                                            Err(e) => {
-                                                let _ = send(&mut socket, &ServerMessage::Error {
-                                                    message: format!("Failed to hash password: {}", e),
-                                                }).await;
-                                            }
-                                        }
+                                        // User does not exist — reject with a clear message.
+                                        let _ = send(&mut socket, &ServerMessage::Error {
+                                            message: format!("用户 '{}' 不存在，请先在管理后台注册", username),
+                                        }).await;
                                     }
                                     Err(e) => {
                                         let _ = send(&mut socket, &ServerMessage::Error {
@@ -118,7 +167,8 @@ async fn handle_socket(mut socket: WebSocket, _username: String, db: Arc<Databas
                                     continue;
                                 }
 
-                                if let Err(e) = apply_state(&db, &state).await {
+                                let user = authenticated_user.clone().unwrap_or_default();
+                                if let Err(e) = apply_state(&db, &user, &state).await {
                                     let _ = send(&mut socket, &ServerMessage::Error {
                                         message: format!("Push failed: {}", e),
                                     }).await;
@@ -138,10 +188,21 @@ async fn handle_socket(mut socket: WebSocket, _username: String, db: Arc<Databas
                                     continue;
                                 }
 
-                                match db.get_state().await {
+                                let user = authenticated_user.clone().unwrap_or_default();
+                                match db.get_state(&user).await {
                                     Ok(state) => {
+                                        // Also fetch attachment metadata so the client
+                                        // can download images it's missing locally.
+                                        let attachments = db
+                                            .list_attachments(&user)
+                                            .await
+                                            .unwrap_or_default()
+                                            .into_iter()
+                                            .map(|(file_name, mime)| AttachmentMeta { file_name, mime })
+                                            .collect();
                                         let _ = send(&mut socket, &ServerMessage::State {
                                             state,
+                                            attachments,
                                         }).await;
                                     }
                                     Err(e) => {
@@ -164,6 +225,9 @@ async fn handle_socket(mut socket: WebSocket, _username: String, db: Arc<Databas
             _ => {}
         }
     }
+
+    // Client disconnected — remove from active clients map.
+    clients.remove(&session_id).await;
 }
 
 async fn send(socket: &mut WebSocket, msg: &ServerMessage) -> Result<(), axum::Error> {
@@ -173,21 +237,21 @@ async fn send(socket: &mut WebSocket, msg: &ServerMessage) -> Result<(), axum::E
     }
 }
 
-async fn apply_state(db: &Database, state: &NotebookState) -> Result<(), String> {
+async fn apply_state(db: &Database, user_id: &str, state: &NotebookState) -> Result<(), String> {
     for folder in &state.folders {
-        db.upsert_folder(folder.clone())
+        db.upsert_folder(user_id.to_string(), folder.clone())
             .await
             .map_err(|e| format!("upsert folder {}: {}", folder.id, e))?;
     }
 
     for note in &state.notes {
-        db.upsert_note(note.clone())
+        db.upsert_note(user_id.to_string(), note.clone())
             .await
             .map_err(|e| format!("upsert note {}: {}", note.id, e))?;
     }
 
     for deleted in &state.deleted {
-        db.delete_entity(deleted.entity_type.clone(), deleted.id.clone())
+        db.delete_entity(user_id.to_string(), deleted.entity_type.clone(), deleted.id.clone())
             .await
             .map_err(|e| format!("delete {} {}: {}", deleted.entity_type, deleted.id, e))?;
     }

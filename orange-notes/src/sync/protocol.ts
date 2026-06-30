@@ -38,11 +38,16 @@ export type ClientMessage =
   | { type: "push"; state: RemoteNotebookState }
   | { type: "request_state" };
 
+export interface RemoteAttachmentMeta {
+  file_name: string;
+  mime: string;
+}
+
 export type ServerMessage =
   | { type: "welcome"; session_id: string }
   | { type: "authenticated" }
   | { type: "authentication_failed" }
   | { type: "push_ack"; version: number }
   | { type: "error"; message: string }
-  | { type: "state"; state: RemoteNotebookState }
+  | { type: "state"; state: RemoteNotebookState; attachments: RemoteAttachmentMeta[] }
   | { type: "server_done" };

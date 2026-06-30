@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import type { Folder, Note } from "@/types/note";
-import type { RemoteFolder, RemoteNote, RemoteNotebookState } from "@/sync/protocol";
+import type { RemoteFolder, RemoteNote, RemoteNotebookState, RemoteDeletedChange } from "@/sync/protocol";
+import { useSyncStore } from "@/sync/useSyncStore";
 
 interface PersistedData {
   folders: Folder[];
@@ -22,6 +23,12 @@ interface NoteStore {
   expandedFolders: Set<string>;
   loading: boolean;
   error: string | null;
+
+  // IDs deleted locally since the last sync payload was generated.
+  // getSyncPayload() drains this into the `deleted` array so the server
+  // knows to remove them (otherwise the server has no way to notice a
+  // pure-delete — it only upserts what it receives).
+  pendingDeletes: Set<string>;
 
   initialize: () => Promise<void>;
   createNote: (folderId: string) => Promise<void>;
@@ -73,6 +80,7 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
   expandedFolders: new Set<string>(),
   loading: true,
   error: null,
+  pendingDeletes: new Set<string>(),
 
   initialize: async () => {
     try {
@@ -103,6 +111,7 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
         notes: [...state.notes, newNote],
         activeNoteId: newNote.id,
       }));
+      useSyncStore.getState().scheduleSync();
     } catch (error) {
       setAsyncError(error, "创建笔记失败");
     }
@@ -113,11 +122,15 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
       await invoke("delete_note", { id });
       set((state) => {
         const notes = state.notes.filter((n) => n.id !== id);
+        const pendingDeletes = new Set(state.pendingDeletes);
+        pendingDeletes.add(id);
         return {
           notes,
           activeNoteId: state.activeNoteId === id ? notes[0]?.id ?? null : state.activeNoteId,
+          pendingDeletes,
         };
       });
+      useSyncStore.getState().scheduleSync();
     } catch (error) {
       setAsyncError(error, "删除笔记失败");
     }
@@ -133,6 +146,7 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
 
     try {
       await invoke("update_note", { id, patch: data });
+      useSyncStore.getState().scheduleSync();
     } catch (error) {
       set({ notes: previous });
       setAsyncError(error, "保存笔记失败");
@@ -154,6 +168,7 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
           targetFolderId,
         ]),
       });
+      useSyncStore.getState().scheduleSync();
     } catch (error) {
       setAsyncError(error, "移动笔记失败");
     }
@@ -173,6 +188,7 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
           expandedFolders: new Set([...state.expandedFolders, parentId]),
         }));
       }
+      useSyncStore.getState().scheduleSync();
     } catch (error) {
       setAsyncError(error, "创建文件夹失败");
     }
@@ -183,6 +199,7 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
     set({ folders: previous.map((folder) => (folder.id === id ? { ...folder, name } : folder)) });
     try {
       await invoke("rename_folder", { id, name });
+      useSyncStore.getState().scheduleSync();
     } catch (error) {
       set({ folders: previous });
       setAsyncError(error, "重命名文件夹失败");
@@ -204,6 +221,11 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
 
     try {
       await invoke("delete_folder", { id });
+      // Register folder deletion so next sync payload tells the server.
+      set((state) => ({
+        pendingDeletes: new Set([...state.pendingDeletes, id]),
+      }));
+      useSyncStore.getState().scheduleSync();
     } catch (error) {
       set({ folders: previousFolders, notes: previousNotes, activeNoteId: previousActive });
       setAsyncError(error, "删除文件夹失败");
@@ -218,6 +240,7 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
         notes: data.notes,
         expandedFolders: new Set(get().expandedFolders),
       });
+      useSyncStore.getState().scheduleSync();
     } catch (error) {
       setAsyncError(error, "移动文件夹失败");
     }
@@ -242,6 +265,7 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
           ...(targetParentId ? [targetParentId] : []),
         ]),
       });
+      useSyncStore.getState().scheduleSync();
     } catch (error) {
       setAsyncError(error, "移动文件夹失败");
     }
@@ -272,7 +296,20 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
   },
 
   getSyncPayload: (): RemoteNotebookState => {
-    const { folders, notes } = get();
+    const { folders, notes, pendingDeletes } = get();
+
+    // Drain pending deletes into the payload and clear the set.
+    // The server needs these IDs to know which entities to remove
+    // (a pure-delete doesn't appear in the notes/folders arrays).
+    const deleted: RemoteDeletedChange[] = [];
+    if (pendingDeletes.size > 0) {
+      const now = Date.now();
+      for (const id of pendingDeletes) {
+        deleted.push({ entity_type: "note", id, deleted_at: now });
+      }
+      set({ pendingDeletes: new Set<string>() });
+    }
+
     return {
       folders: folders.map((f) => ({
         id: f.id,
@@ -292,7 +329,7 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
         pinned: n.pinned,
         favorite: n.favorite,
       })),
-      deleted: [],
+      deleted,
       version: Date.now(),
     };
   },

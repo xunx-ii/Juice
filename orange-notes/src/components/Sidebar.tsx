@@ -1,4 +1,4 @@
-import { Plus, FolderPlus, Settings, Check, Loader2, Save } from "lucide-react";
+import { Plus, FolderPlus, Settings, Check, Loader2, Save, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SearchBar } from "@/components/SearchBar";
 import { TreeView } from "@/components/TreeView";
@@ -17,12 +17,62 @@ import { Input } from "@/components/ui/input";
 import { useSyncStore } from "@/sync/useSyncStore";
 
 function SyncSettingsSection() {
-  const { settings, lastError, setSettings } = useSyncStore();
+  const { settings, lastError, lastSync, setSettings, testing, syncing, startSync } = useSyncStore();
   const [address, setAddress] = useState(settings.address);
   const [username, setUsername] = useState(settings.username);
   const [password, setPassword] = useState(settings.password);
   const [status, setStatus] = useState<"idle" | "testing" | "ok" | "fail">("idle");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [showRegister, setShowRegister] = useState(false);
+  const [regUsername, setRegUsername] = useState("");
+  const [regPassword, setRegPassword] = useState("");
+  const [regStatus, setRegStatus] = useState<"idle" | "loading" | "ok" | "fail">("idle");
+  const [regMessage, setRegMessage] = useState<string | null>(null);
+
+  const handleRegister = async () => {
+    if (!address) {
+      setRegStatus("fail");
+      setRegMessage("请先填写服务器地址");
+      return;
+    }
+    if (!regUsername.trim() || !regPassword) {
+      setRegStatus("fail");
+      setRegMessage("请填写用户名和密码");
+      return;
+    }
+    setRegStatus("loading");
+    setRegMessage("注册中…");
+    try {
+      // Derive HTTP base from WS address.
+      let httpBase = address.trim();
+      if (httpBase.startsWith("ws://")) httpBase = "http://" + httpBase.slice(5);
+      else if (httpBase.startsWith("wss://")) httpBase = "https://" + httpBase.slice(6);
+      else if (!httpBase.startsWith("http")) httpBase = "http://" + httpBase;
+      httpBase = httpBase.replace(/\/$/, "");
+
+      const r = await fetch(`${httpBase}/api/admin/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: regUsername.trim(), password: regPassword }),
+      });
+      const data = await r.json();
+      if (data.success) {
+        setRegStatus("ok");
+        setRegMessage(data.message);
+        // Auto-fill the credentials.
+        setUsername(regUsername.trim());
+        setPassword(regPassword);
+        setRegUsername("");
+        setRegPassword("");
+      } else {
+        setRegStatus("fail");
+        setRegMessage(data.message);
+      }
+    } catch (e) {
+      setRegStatus("fail");
+      setRegMessage(e instanceof Error ? e.message : "注册请求失败");
+    }
+  };
 
   const handleTest = async () => {
     if (!address || !username || !password) {
@@ -32,20 +82,29 @@ function SyncSettingsSection() {
     }
     setSettings({ address, username, password });
     setStatus("testing");
-    setStatusMessage("正在测试连接…");
+    setStatusMessage("正在连接并认证…");
     try {
       const { testConnection } = useSyncStore.getState();
       await testConnection();
       setStatus("ok");
-      setStatusMessage("连接成功");
+      setStatusMessage("连接成功！");
     } catch (e) {
       setStatus("fail");
-      setStatusMessage(String(e));
+      setStatusMessage(e instanceof Error ? e.message : String(e));
+      // Ensure store testing flag is reset even if testConnection throws
+      // unexpectedly before reaching its own cleanup.
+      useSyncStore.getState().setState({ testing: false });
     }
   };
 
   const handleSave = () => {
     setSettings({ address, username, password });
+  };
+
+  const formatLastSync = (ts: number | null) => {
+    if (!ts) return null;
+    const d = new Date(ts);
+    return `上次同步: ${d.toLocaleTimeString("zh-CN")}`;
   };
 
   return (
@@ -87,8 +146,8 @@ function SyncSettingsSection() {
       )}
 
       <div className="flex gap-2">
-        <Button variant="secondary" size="sm" disabled={status === "testing"} onClick={handleTest}>
-          {status === "testing" ? (
+        <Button variant="secondary" size="sm" disabled={testing} onClick={handleTest}>
+          {testing ? (
             <Loader2 className="mr-1 h-3 w-3 animate-spin" />
           ) : (
             <Check className="mr-1 h-3 w-3" />
@@ -99,10 +158,74 @@ function SyncSettingsSection() {
           <Save className="mr-1 h-3 w-3" />
           保存
         </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={syncing || testing}
+          onClick={startSync}
+          title="立即同步笔记"
+        >
+          {syncing ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <RefreshCw className="h-3 w-3" />
+          )}
+        </Button>
       </div>
 
       {lastError && (
-        <div className="text-xs text-destructive">{lastError}</div>
+        <div className="text-xs text-destructive">❌ {lastError}</div>
+      )}
+
+      {!lastError && lastSync && (
+        <div className="text-xs text-muted-foreground">
+          ✓ {formatLastSync(lastSync)}
+        </div>
+      )}
+
+      {/* Registration toggle */}
+      <button
+        type="button"
+        className="text-xs text-blue-400 hover:text-blue-300 cursor-pointer"
+        onClick={() => setShowRegister(!showRegister)}
+      >
+        {showRegister ? "取消注册" : "还没有账号？立即注册"}
+      </button>
+
+      {showRegister && (
+        <div className="space-y-2 pt-2 border-t border-border/50">
+          <div className="text-xs text-muted-foreground">注册新账号（将同步到服务器）</div>
+          <Input
+            value={regUsername}
+            onChange={(e) => setRegUsername(e.target.value)}
+            placeholder="新用户名"
+          />
+          <Input
+            type="password"
+            value={regPassword}
+            onChange={(e) => setRegPassword(e.target.value)}
+            placeholder="设置密码"
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={regStatus === "loading"}
+            onClick={handleRegister}
+          >
+            {regStatus === "loading" ? (
+              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+            ) : null}
+            注册
+          </Button>
+          {regMessage && (
+            <div className={`text-xs ${
+              regStatus === "ok" ? "text-emerald-500" :
+              regStatus === "fail" ? "text-destructive" : "text-muted-foreground"
+            }`}>
+              {regStatus === "ok" ? "✓ " : regStatus === "fail" ? "❌ " : ""}{regMessage}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -168,6 +291,8 @@ export function Sidebar() {
   const folders = useNoteStore((s) => s.folders);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const syncConnected = useSyncStore((s) => s.authenticated);
+  const syncLastSync = useSyncStore((s) => s.lastSync);
   const [newFolderName, setNewFolderName] = useState("");
 
   const handleCreateNote = async () => {
@@ -231,8 +356,14 @@ export function Sidebar() {
       {/* Footer */}
       <div className="flex items-center justify-between px-3 py-1.5 border-t border-border shrink-0">
         <div className="flex items-center gap-2">
-          <span className="inline-block w-2 h-2 rounded-full bg-green-500" />
-          <span className="text-[11px] text-muted-foreground">日记已同步</span>
+          <span className={`inline-block w-2 h-2 rounded-full ${syncConnected ? "bg-green-500" : "bg-gray-400"}`} />
+          <span className="text-[11px] text-muted-foreground">
+            {syncConnected
+              ? syncLastSync
+                ? `已同步 · ${new Date(syncLastSync).toLocaleTimeString("zh-CN")}`
+                : "已连接"
+              : "未连接"}
+          </span>
         </div>
         <Button
           variant="ghost"

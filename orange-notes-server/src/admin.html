@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>桔子笔记 · 管理后台</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f1117; color: #e1e4e8; line-height: 1.6; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+  header { border-bottom: 1px solid #21262d; padding-bottom: 1.5rem; margin-bottom: 2rem; }
+  h1 { font-size: 1.5rem; color: #f97316; }
+  .subtitle { color: #8b949e; font-size: 0.875rem; margin-top: 0.25rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+  .card { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 1.25rem; }
+  .card h3 { color: #8b949e; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
+  .card .value { font-size: 2rem; font-weight: 600; color: #f0f6fc; }
+  .card .value.online { color: #3fb950; }
+  .card .value.offline { color: #f85149; }
+  .section { margin-bottom: 2rem; }
+  .section h2 { font-size: 1rem; color: #f0f6fc; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid #21262d; }
+  table { width: 100%; border-collapse: collapse; background: #161b22; border-radius: 8px; overflow: hidden; }
+  th, td { padding: 0.75rem 1rem; text-align: left; font-size: 0.875rem; }
+  th { background: #21262d; color: #8b949e; font-weight: 500; font-size: 0.75rem; text-transform: uppercase; }
+  td { border-top: 1px solid #21262d; }
+  tr:hover td { background: #1c2128; }
+  .empty { text-align: center; color: #484f58; padding: 2rem; }
+  .badge { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.75rem; font-weight: 500; }
+  .badge.online { background: #23863622; color: #3fb950; }
+  .badge .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .refresh { float: right; font-size: 0.8rem; background: #21262d; border: 1px solid #30363d; color: #c9d1d9; padding: 0.4rem 0.8rem; border-radius: 6px; cursor: pointer; }
+  .refresh:hover { background: #30363d; }
+  .error { color: #f85149; padding: 1rem; }
+  footer { text-align: center; color: #484f58; font-size: 0.75rem; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #21262d; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>🍊 桔子笔记 · 管理后台</h1>
+    <p class="subtitle" id="subtitle">加载中…</p>
+  </header>
+
+  <div id="error-area"></div>
+
+  <div class="grid" id="stats-grid">
+    <div class="card"><h3>文件夹总数</h3><div class="value" id="folder-count">—</div></div>
+    <div class="card"><h3>笔记总数</h3><div class="value" id="note-count">—</div></div>
+    <div class="card"><h3>注册用户</h3><div class="value" id="user-count">—</div></div>
+    <div class="card"><h3>已删除</h3><div class="value" id="deleted-count">—</div></div>
+    <div class="card"><h3>在线连接</h3><div class="value online" id="ws-count">—</div></div>
+    <div class="card"><h3>运行时间</h3><div class="value" id="uptime">—</div></div>
+  </div>
+
+  <div class="section">
+    <h2>
+      WebSocket 在线客户端
+      <button class="refresh" onclick="loadAll()">刷新</button>
+    </h2>
+    <table>
+      <thead><tr><th>用户</th><th>连接时间</th></tr></thead>
+      <tbody id="ws-tbody"><tr><td colspan="2" class="empty">加载中…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>注册用户
+      <button class="refresh" onclick="toggleRegister()">+ 新建</button>
+    </h2>
+    <div id="register-form" style="display:none; margin-top:1rem;">
+      <div style="display:flex; gap:0.75rem; flex-wrap:wrap; align-items:flex-end;">
+        <div>
+          <label style="display:block; font-size:0.75rem; color:#8b949e; margin-bottom:0.3rem;">用户名</label>
+          <input id="reg-username" type="text" placeholder="输入用户名" style="background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:0.45rem 0.7rem; border-radius:6px; font-size:0.875rem; width:180px;">
+        </div>
+        <div>
+          <label style="display:block; font-size:0.75rem; color:#8b949e; margin-bottom:0.3rem;">密码</label>
+          <input id="reg-password" type="password" placeholder="输入密码" style="background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:0.45rem 0.7rem; border-radius:6px; font-size:0.875rem; width:180px;">
+        </div>
+        <button onclick="doRegister()" style="background:#238636; border:none; color:#fff; padding:0.45rem 0.9rem; border-radius:6px; font-size:0.8rem; cursor:pointer;">注册</button>
+      </div>
+      <div id="register-msg" style="margin-top:0.6rem; font-size:0.8rem;"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>用户列表</h2>
+    <table>
+      <thead><tr><th>序号</th><th>用户名</th><th style="text-align:right;">操作</th></tr></thead>
+      <tbody id="user-tbody"><tr><td colspan="3" class="empty">加载中…</td></tr></tbody>
+    </table>
+  </div>
+
+  <footer>桔子笔记 Server v<span id="version">—</span></footer>
+</div>
+
+<!-- Token login modal -->
+<div id="token-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:1000; align-items:center; justify-content:center;">
+  <div style="background:#161b22; border:1px solid #30363d; border-radius:12px; padding:2rem; max-width:360px; width:90%;">
+    <h2 style="color:#f0f6fc; font-size:1.1rem; margin-bottom:0.5rem;">🔐 管理员验证</h2>
+    <p style="color:#8b949e; font-size:0.8rem; margin-bottom:1.25rem;">请输入管理令牌（ADMIN_TOKEN）以访问后台</p>
+    <input id="token-input" type="password" placeholder="管理令牌" style="width:100%; background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:0.6rem 0.8rem; border-radius:6px; font-size:0.875rem; margin-bottom:1rem; box-sizing:border-box;">
+    <button onclick="submitToken()" style="width:100%; background:#238636; border:none; color:#fff; padding:0.55rem; border-radius:6px; font-size:0.875rem; cursor:pointer;">登录</button>
+    <div id="token-error" style="margin-top:0.6rem; font-size:0.8rem; color:#f85149;"></div>
+  </div>
+</div>
+
+<script>
+// Token management
+function getToken() { return localStorage.getItem('admin_token') || ''; }
+function setToken(t) { localStorage.setItem('admin_token', t); }
+
+async function fetchJSON(path) {
+  const token = getToken();
+  const headers = {};
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const r = await fetch(path, { headers });
+  if (r.status === 401) {
+    // Token missing or invalid — show the login modal.
+    document.getElementById('token-modal').style.display = 'flex';
+    throw new Error('未授权：请提供有效的管理令牌');
+  }
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+function submitToken() {
+  const t = document.getElementById('token-input').value.trim();
+  if (!t) return;
+  setToken(t);
+  document.getElementById('token-modal').style.display = 'none';
+  document.getElementById('token-error').textContent = '';
+  loadAll();
+}
+
+function fmtUptime(sec) {
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return `${d}天${h}时`;
+  if (h > 0) return `${h}小时${m}分`;
+  return `${m}分钟`;
+}
+
+function showError(msg) {
+  document.getElementById('error-area').innerHTML = `<div class="error">⚠️ ${msg}</div>`;
+}
+function clearError() {
+  document.getElementById('error-area').innerHTML = '';
+}
+
+async function loadStats() {
+  try {
+    const info = await fetchJSON('/api/admin/systeminfo');
+    document.getElementById('folder-count').textContent = info.folder_count ?? 0;
+    document.getElementById('note-count').textContent = info.note_count ?? 0;
+    document.getElementById('user-count').textContent = info.user_count ?? 0;
+    document.getElementById('deleted-count').textContent = info.deleted_count ?? 0;
+    document.getElementById('ws-count').textContent = info.active_ws_clients ?? 0;
+    document.getElementById('uptime').textContent = fmtUptime(info.uptime_seconds ?? 0);
+    document.getElementById('version').textContent = info.version ?? '—';
+    const startDate = new Date(Date.now() - (info.uptime_seconds ?? 0) * 1000);
+    document.getElementById('subtitle').textContent = `服务自 ${startDate.toLocaleString('zh-CN')} 运行中`;
+    clearError();
+  } catch (e) {
+    showError(`系统信息加载失败: ${e.message}`);
+  }
+}
+
+async function loadClients() {
+  try {
+    const data = await fetchJSON('/api/admin/ws_clients');
+    const clients = data.clients ?? [];
+    const tbody = document.getElementById('ws-tbody');
+    if (clients.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="2" class="empty">当前没有客户端连接</td></tr>';
+    } else {
+      tbody.innerHTML = clients.map(c => `<tr>
+        <td><span class="badge online"><span class="dot"></span>${c.username || '未知'}</span></td>
+        <td>${c.connected_at || '—'}</td>
+      </tr>`).join('');
+    }
+  } catch (e) {
+    document.getElementById('ws-tbody').innerHTML = `<tr><td colspan="2" class="empty">加载失败: ${e.message}</td></tr>`;
+  }
+}
+
+async function loadUsers() {
+  try {
+    const data = await fetchJSON('/api/admin/users?page=1&page_size=50');
+    const users = data.users ?? [];
+    const tbody = document.getElementById('user-tbody');
+    if (users.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="2" class="empty">暂无注册用户</td></tr>';
+    } else {
+      const start = (data.pager?.page - 1) * data.pager?.page_size || 0;
+      tbody.innerHTML = users.map((u, i) => `<tr>
+        <td>${start + i + 1}</td>
+        <td>${u.username}</td>
+        <td style="text-align:right;">
+          <button onclick="deleteUser('${u.username}')" style="background:none; border:1px solid #f8514944; color:#f85149; padding:0.2rem 0.5rem; border-radius:4px; font-size:0.7rem; cursor:pointer;">删除</button>
+        </td>
+      </tr>`).join('');
+    }
+  } catch (e) {
+    document.getElementById('user-tbody').innerHTML = `<tr><td colspan="3" class="empty">加载失败: ${e.message}</td></tr>`;
+  }
+}
+
+async function deleteUser(username) {
+  if (!confirm(`确定要删除用户 '${username}' 吗？\n此操作将同时删除该用户的所有笔记，不可恢复。`)) return;
+  const token = getToken();
+  try {
+    const r = await fetch(`/api/admin/users/${encodeURIComponent(username)}`, {
+      method: 'DELETE',
+      headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+    });
+    const data = await r.json();
+    if (data.success) {
+      loadUsers();
+      loadStats();
+    } else {
+      alert('删除失败: ' + data.message);
+    }
+  } catch (e) {
+    alert('请求失败: ' + e.message);
+  }
+}
+
+function toggleRegister() {
+  const el = document.getElementById('register-form');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+async function doRegister() {
+  const username = document.getElementById('reg-username').value.trim();
+  const password = document.getElementById('reg-password').value;
+  const msgEl = document.getElementById('register-msg');
+
+  if (!username || !password) {
+    msgEl.innerHTML = '<span style="color:#f85149;">请填写用户名和密码</span>';
+    return;
+  }
+
+  msgEl.innerHTML = '<span style="color:#8b949e;">注册中…</span>';
+
+  try {
+    const r = await fetch('/api/admin/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await r.json();
+    if (data.success) {
+      msgEl.innerHTML = `<span style="color:#3fb950;">✓ ${data.message}</span>`;
+      document.getElementById('reg-username').value = '';
+      document.getElementById('reg-password').value = '';
+      loadUsers();
+      loadStats();
+    } else {
+      msgEl.innerHTML = `<span style="color:#f85149;">✗ ${data.message}</span>`;
+    }
+  } catch (e) {
+    msgEl.innerHTML = `<span style="color:#f85149;">请求失败: ${e.message}</span>`;
+  }
+}
+
+async function loadAll() {
+  await Promise.all([loadStats(), loadClients(), loadUsers()]);
+}
+
+// If no saved token, show modal on first load.
+if (!getToken()) {
+  document.getElementById('token-modal').style.display = 'flex';
+} else {
+  loadAll();
+  setInterval(loadAll, 15000);
+}
+</script>
+</body>
+</html>

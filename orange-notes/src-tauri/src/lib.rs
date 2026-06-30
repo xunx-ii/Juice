@@ -765,6 +765,54 @@ fn load_note_image(state: tauri::State<'_, AppState>, file_name: String) -> Resu
     })
 }
 
+/// Read a local image file as raw bytes (for uploading to the server).
+#[tauri::command]
+fn read_note_image_bytes(state: tauri::State<'_, AppState>, file_name: String) -> Result<Vec<u8>, AppError> {
+    let path = state.img_dir.join(&file_name);
+    let canonical_img = state.img_dir.canonicalize()?;
+    let canonical_path = path.canonicalize()?;
+    if !canonical_path.starts_with(canonical_img) {
+        return Err(AppError::Path("image path escaped img directory".to_string()));
+    }
+    Ok(fs::read(canonical_path)?)
+}
+
+/// Check if a local image file exists (without reading it).
+#[tauri::command]
+fn image_file_exists(state: tauri::State<'_, AppState>, file_name: String) -> Result<bool, AppError> {
+    if file_name.contains('/') || file_name.contains('\\') || file_name.is_empty() {
+        return Ok(false);
+    }
+    let path = state.img_dir.join(&file_name);
+    Ok(path.exists())
+}
+
+/// Save a downloaded image to the local img directory (for syncing from server).
+#[tauri::command]
+fn save_synced_image(
+    state: tauri::State<'_, AppState>,
+    file_name: String,
+    mime: String,
+    bytes: Vec<u8>,
+) -> Result<(), AppError> {
+    // Validate filename — no path separators.
+    if file_name.contains('/') || file_name.contains('\\') || file_name.is_empty() {
+        return Err(AppError::Path("invalid file name".to_string()));
+    }
+    let path = state.img_dir.join(&file_name);
+    let canonical_img = state.img_dir.canonicalize()?;
+    let canonical_path = path.canonicalize().unwrap_or(path.clone());
+    if !canonical_path.starts_with(canonical_img) {
+        return Err(AppError::Path("image path escaped img directory".to_string()));
+    }
+    // Only write if the file doesn't already exist (dedup by hash-named filename).
+    if !canonical_path.exists() {
+        fs::write(&canonical_path, &bytes)?;
+    }
+    let _ = mime; // mime is informational; filename already encodes type
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
@@ -795,6 +843,9 @@ pub fn run() {
             save_clipboard_image,
             resolve_image_path,
             load_note_image,
+            read_note_image_bytes,
+            image_file_exists,
+            save_synced_image,
             apply_remote_notebook
         ])
         .run(tauri::generate_context!())

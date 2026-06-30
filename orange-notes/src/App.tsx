@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import {
   PanelLeft,
   PanelRight,
@@ -24,23 +24,30 @@ function App() {
   const error = useNoteStore((s) => s.error);
   const { settings: syncSettings, pushState } = useSyncStore();
 
-  // Setup sync listener + auto-sync every 30s when settings are complete.
+  // Auto-sync every 30s when settings are complete. The pushState function
+  // now handles connection/auth automatically.
+  const pushStateRef = useRef(pushState);
+  useEffect(() => {
+    pushStateRef.current = pushState;
+  }, [pushState]);
+
   useEffect(() => {
     const store = useNoteStore;
     const handler = async () => {
-      if (!syncSettings.address || !syncSettings.username || !syncSettings.password) return;
+      const { settings: s } = useSyncStore.getState();
+      if (!s.address || !s.username || !s.password) return;
       try {
         const payload = store.getState().getSyncPayload();
-        const result = await pushState(payload);
+        const result = await pushStateRef.current(payload);
         await store.getState().applyRemoteChanges(result);
       } catch {
-        // auto-sync failure is silent
+        // auto-sync failure is silent — will retry next interval.
       }
     };
 
     const id = window.setInterval(handler, 30_000);
     return () => window.clearInterval(id);
-  }, [syncSettings, pushState]);
+  }, []);
 
   useEffect(() => {
     void initialize();

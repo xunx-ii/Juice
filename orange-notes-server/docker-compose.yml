@@ -11,6 +11,7 @@ services:
     environment:
       DATABASE_URL: /data/notes.sqlite
       RUST_LOG: info
+      ADMIN_TOKEN: admin123
 
 volumes:
   notes-data:
