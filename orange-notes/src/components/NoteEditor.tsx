@@ -1,0 +1,588 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import {
+  Eye,
+  Edit3,
+  Pin,
+  Trash2,
+  MoreHorizontal,
+  Folders,
+  Clock,
+} from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { useNoteStore } from "@/store/useNoteStore";
+import { useDebounce } from "@/hooks/useDebounce";
+
+const IMAGE_TOKEN_RE = /!\[\[([^\]\r\n]+)\]\]/g;
+
+type Segment =
+  | { type: "text"; value: string }
+  | { type: "image"; fileName: string };
+
+interface StoredImage {
+  fileName: string;
+}
+
+interface ImagePayload {
+  mime: string;
+  bytes: number[];
+}
+
+const imageUrlCache = new Map<string, string>();
+
+function revokeCachedImage(fileName: string) {
+  const url = imageUrlCache.get(fileName);
+  if (url) {
+    URL.revokeObjectURL(url);
+    imageUrlCache.delete(fileName);
+  }
+}
+
+function normalizeFileName(value: string): string | null {
+  const fileName = value.trim();
+  if (!fileName || fileName.includes("/") || fileName.includes("\\")) return null;
+  return fileName;
+}
+
+function imageToken(fileName: string) {
+  return `![[${fileName}]]`;
+}
+
+function splitSegments(content: string): Segment[] {
+  const segments: Segment[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  IMAGE_TOKEN_RE.lastIndex = 0;
+
+  while ((match = IMAGE_TOKEN_RE.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({ type: "text", value: content.slice(lastIndex, match.index) });
+    }
+
+    const fileName = normalizeFileName(match[1]);
+    segments.push(fileName ? { type: "image", fileName } : { type: "text", value: match[0] });
+    lastIndex = IMAGE_TOKEN_RE.lastIndex;
+  }
+
+  if (lastIndex < content.length) {
+    segments.push({ type: "text", value: content.slice(lastIndex) });
+  }
+  return segments;
+}
+
+function segmentsToMarkdown(segments: Segment[]) {
+  return segments
+    .map((segment) => (segment.type === "text" ? segment.value : imageToken(segment.fileName)))
+    .join("");
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function NoteImage({
+  fileName,
+  className,
+}: {
+  fileName: string;
+  className?: string;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [src, setSrc] = useState(() => imageUrlCache.get(fileName) ?? "");
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setSrc(imageUrlCache.get(fileName) ?? "");
+    setFailed(false);
+  }, [fileName]);
+
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || src || failed) return;
+
+    let canceled = false;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        observer.disconnect();
+
+        void invoke<ImagePayload>("load_note_image", { fileName })
+          .then((payload) => {
+            if (canceled) return;
+            const url = URL.createObjectURL(
+              new Blob([new Uint8Array(payload.bytes)], { type: payload.mime })
+            );
+            imageUrlCache.set(fileName, url);
+            setSrc(url);
+          })
+          .catch((error) => {
+            console.error("Failed to load note image", error);
+            if (!canceled) setFailed(true);
+          });
+      },
+      { rootMargin: "700px 0px" }
+    );
+
+    observer.observe(node);
+    return () => {
+      canceled = true;
+      observer.disconnect();
+    };
+  }, [failed, fileName, src]);
+
+  return (
+    <div
+      ref={ref}
+      className="my-2 inline-flex min-h-24 min-w-40 items-center justify-center overflow-hidden rounded border bg-muted/20 align-middle"
+    >
+      {src ? (
+        <img
+          src={src}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          className={className ?? "max-h-[560px] max-w-full object-contain"}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function TextSegmentEditor({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const textarea = ref.current;
+    if (!textarea) return;
+    textarea.style.height = "0px";
+    textarea.style.height = `${Math.max(textarea.scrollHeight, 96)}px`;
+  }, [value]);
+
+  return (
+    <textarea
+      ref={ref}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      placeholder="开始写作..."
+      className="block w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-sm leading-relaxed outline-none placeholder:text-muted-foreground focus-visible:ring-0"
+      spellCheck
+    />
+  );
+}
+
+function LiveEditor({
+  content,
+  onChange,
+  onImageRemove,
+  onPasteCapture,
+}: {
+  content: string;
+  onChange: (v: string) => void;
+  onImageRemove: (v: string) => void;
+  onPasteCapture: (e: React.ClipboardEvent) => void;
+}) {
+  const segments = useMemo<Segment[]>(
+    () => {
+      const parsed = splitSegments(content);
+      return parsed.length > 0 ? parsed : [{ type: "text", value: "" }];
+    },
+    [content]
+  );
+
+  const updateTextSegment = useCallback(
+    (segmentIndex: number, newText: string) => {
+      const next = segments.map((segment, index) =>
+        index === segmentIndex && segment.type === "text"
+          ? { ...segment, value: newText }
+          : segment
+      );
+      onChange(segmentsToMarkdown(next));
+    },
+    [onChange, segments]
+  );
+
+  const removeImage = useCallback(
+    (segmentIndex: number) => {
+      const segment = segments[segmentIndex];
+      if (segment?.type === "image") {
+        revokeCachedImage(segment.fileName);
+      }
+      const next = segmentsToMarkdown(segments.filter((_, index) => index !== segmentIndex));
+      onImageRemove(next);
+    },
+    [onImageRemove, segments]
+  );
+
+  return (
+    <div
+      className="w-full min-h-full text-sm leading-relaxed whitespace-pre-wrap break-words outline-none"
+      onPasteCapture={onPasteCapture}
+    >
+      {segments.map((segment, index) =>
+        segment.type === "image" ? (
+            <span
+              key={`${segment.fileName}-${index}`}
+              className="inline-flex items-start gap-1 my-1 mx-0.5 group relative"
+            >
+              <NoteImage
+                fileName={segment.fileName}
+                className="max-h-[240px] max-w-[min(460px,80vw)] object-contain"
+              />
+              <button
+                onClick={() => removeImage(index)}
+                className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-destructive text-destructive-foreground text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity shadow-sm hover:scale-110"
+                title="删除图片"
+              >
+                x
+              </button>
+            </span>
+          ) : (
+            <TextSegmentEditor
+              key={`text-${index}`}
+              value={segment.value}
+              onChange={(value) => updateTextSegment(index, value)}
+            />
+          )
+      )}
+    </div>
+  );
+}
+
+function PreviewContent({ content }: { content: string }) {
+  const segments = useMemo(() => splitSegments(content), [content]);
+  if (segments.length === 0) {
+    return <Markdown remarkPlugins={[remarkGfm]}>*空白笔记*</Markdown>;
+  }
+
+  return (
+    <>
+      {segments.map((segment, index) =>
+        segment.type === "image" ? (
+          <NoteImage key={`${segment.fileName}-${index}`} fileName={segment.fileName} />
+        ) : (
+          <Markdown key={`text-${index}`} remarkPlugins={[remarkGfm]}>
+            {segment.value}
+          </Markdown>
+        )
+      )}
+    </>
+  );
+}
+
+export function NoteEditor() {
+  const activeNoteId = useNoteStore((s) => s.activeNoteId);
+  const notes = useNoteStore((s) => s.notes);
+  const folders = useNoteStore((s) => s.folders);
+  const updateNote = useNoteStore((s) => s.updateNote);
+  const deleteNote = useNoteStore((s) => s.deleteNote);
+
+  const activeNote = notes.find((n) => n.id === activeNoteId);
+  const activeFolder = folders.find((f) => f.id === activeNote?.folder);
+  const activeContent = activeNote?.content;
+  const activeTitle = activeNote?.title;
+
+  const [content, setContent] = useState("");
+  const [title, setTitle] = useState("");
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [editTitle, setEditTitle] = useState(false);
+  const syncedNoteIdRef = useRef<string | null>(null);
+  const skipNextContentSaveRef = useRef(false);
+  const skipNextTitleSaveRef = useRef(false);
+  const pasteLockRef = useRef(false);
+  const deleteInFlightRef = useRef(false);
+  const debouncedContent = useDebounce(content, 500);
+  const debouncedTitle = useDebounce(title, 500);
+
+  useEffect(() => {
+    if (
+      activeNoteId &&
+      activeContent !== undefined &&
+      activeTitle !== undefined &&
+      syncedNoteIdRef.current !== activeNoteId
+    ) {
+      skipNextContentSaveRef.current = true;
+      skipNextTitleSaveRef.current = true;
+      setContent(activeContent);
+      setTitle(activeTitle);
+      setEditTitle(false);
+      syncedNoteIdRef.current = activeNoteId;
+    }
+  }, [activeContent, activeNoteId, activeTitle]);
+
+  useEffect(() => {
+    if (skipNextContentSaveRef.current) {
+      skipNextContentSaveRef.current = false;
+      return;
+    }
+    if (activeNoteId && activeContent !== undefined && debouncedContent !== activeContent) {
+      void updateNote(activeNoteId, { content: debouncedContent });
+    }
+  }, [activeContent, activeNoteId, debouncedContent, updateNote]);
+
+  useEffect(() => {
+    if (skipNextTitleSaveRef.current) {
+      skipNextTitleSaveRef.current = false;
+      return;
+    }
+    const normalizedTitle = debouncedTitle.trim();
+    if (activeNoteId && activeTitle !== undefined && normalizedTitle && normalizedTitle !== activeTitle) {
+      void updateNote(activeNoteId, { title: normalizedTitle });
+    }
+  }, [activeNoteId, activeTitle, debouncedTitle, updateNote]);
+
+  const openDeleteDialog = useCallback(() => {
+    if (!activeNote || deleteInFlightRef.current) return;
+    setDeleteTarget({ id: activeNote.id, title: activeNote.title || "未命名笔记" });
+    setShowDeleteDialog(true);
+  }, [activeNote]);
+
+  const handleDelete = useCallback(async () => {
+    if (deleteInFlightRef.current || !deleteTarget) return;
+    deleteInFlightRef.current = true;
+    setDeleting(true);
+    try {
+      await deleteNote(deleteTarget.id);
+      setShowDeleteDialog(false);
+      setDeleteTarget(null);
+    } finally {
+      deleteInFlightRef.current = false;
+      setDeleting(false);
+    }
+  }, [deleteNote, deleteTarget]);
+
+  const handleImageRemove = useCallback(
+    (nextContent: string) => {
+      setContent(nextContent);
+      if (activeNoteId) {
+        skipNextContentSaveRef.current = true;
+        void updateNote(activeNoteId, { content: nextContent });
+      }
+    },
+    [activeNoteId, updateNote]
+  );
+
+  const handlePasteCapture = useCallback(async (event: React.ClipboardEvent) => {
+    const imageItem = Array.from(event.clipboardData.items).find((item) =>
+      item.type.startsWith("image/")
+    );
+    if (!imageItem || pasteLockRef.current) return;
+
+    const file = imageItem.getAsFile();
+    if (!file) return;
+
+    pasteLockRef.current = true;
+    event.preventDefault();
+    event.stopPropagation();
+
+    try {
+      const base64Data = await fileToBase64(file);
+      const saved = await invoke<StoredImage>("save_clipboard_image", {
+        mime: file.type,
+        base64Data,
+      });
+      imageUrlCache.set(saved.fileName, URL.createObjectURL(file));
+      setContent((prev) => {
+        const prefix = prev.length === 0 || prev.endsWith("\n") ? "" : "\n";
+        return `${prev}${prefix}${imageToken(saved.fileName)}\n`;
+      });
+    } finally {
+      window.setTimeout(() => {
+        pasteLockRef.current = false;
+      }, 0);
+    }
+  }, []);
+
+  if (!activeNote) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-muted-foreground bg-background">
+        <div className="text-center max-w-md">
+          <div className="mb-4 inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-muted">
+            <Edit3 className="h-8 w-8 opacity-40" />
+          </div>
+          <h2 className="text-lg font-medium mb-2">选择一个笔记</h2>
+          <p className="text-sm text-muted-foreground/70">
+            从左侧树形列表中选择一个笔记开始编辑
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col h-full bg-background">
+      <div className="flex items-center justify-between px-4 py-2 border-b bg-muted/20">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <Folders className="h-3.5 w-3.5" />
+          <span>{activeFolder?.name || "未分类"}</span>
+          <span className="mx-1">·</span>
+          <Clock className="h-3.5 w-3.5" />
+          <span>
+            {new Date(activeNote.updatedAt).toLocaleString("zh-CN", {
+              month: "short",
+              day: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+          </span>
+        </div>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={() => void updateNote(activeNote.id, { pinned: !activeNote.pinned })}
+          >
+            <Pin
+              className={`h-3.5 w-3.5 ${
+                activeNote.pinned ? "text-amber-500 fill-amber-500" : ""
+              }`}
+            />
+          </Button>
+
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-7 w-7">
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                onClick={openDeleteDialog}
+              >
+                <Trash2 className="h-4 w-4 mr-2" />
+                删除笔记
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+
+      <Tabs defaultValue="preview" className="flex-1 flex flex-col min-h-0">
+        <div className="px-4 pt-1.5 border-b">
+          <TabsList className="h-8">
+            <TabsTrigger value="edit" className="text-xs gap-1.5">
+              <Edit3 className="h-3.5 w-3.5" />
+              编辑
+            </TabsTrigger>
+            <TabsTrigger value="preview" className="text-xs gap-1.5">
+              <Eye className="h-3.5 w-3.5" />
+              预览
+            </TabsTrigger>
+          </TabsList>
+        </div>
+
+        <TabsContent value="edit" className="flex-1 p-0 m-0 min-h-0">
+          <div className="h-full flex flex-col">
+            <div className="px-4 pt-3 pb-1">
+              {editTitle ? (
+                <Input
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  onBlur={() => setEditTitle(false)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") setEditTitle(false);
+                  }}
+                  className="text-lg font-bold border-0 p-0 h-8 focus-visible:ring-0"
+                  autoFocus
+                />
+              ) : (
+                <h2
+                  className="text-lg font-bold cursor-text hover:bg-muted/50 -ml-1 px-1 py-0.5 rounded"
+                  onClick={() => setEditTitle(true)}
+                >
+                  {activeNote.title || "未命名笔记"}
+                </h2>
+              )}
+            </div>
+            <div className="flex-1 overflow-auto px-4 pb-4 pt-1">
+              <LiveEditor
+                content={content}
+                onChange={setContent}
+                onImageRemove={handleImageRemove}
+                onPasteCapture={handlePasteCapture}
+              />
+            </div>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="preview" className="flex-1 p-0 m-0 min-h-0 overflow-auto">
+          <div className="px-8 py-4 w-full">
+            <h1 className="text-2xl font-bold mb-4">
+              {activeNote.title || "未命名笔记"}
+            </h1>
+            <div className="prose prose-sm dark:prose-invert max-w-none prose-headings:font-semibold prose-a:text-primary prose-code:bg-muted prose-code:px-1.5 prose-code:rounded prose-code:text-foreground prose-pre:bg-[#f6f8fa] dark:prose-pre:bg-muted/60 prose-pre:border prose-pre:shadow-sm prose-pre:text-[#1a1a1a] dark:prose-pre:text-foreground">
+              <PreviewContent content={content} />
+            </div>
+          </div>
+        </TabsContent>
+      </Tabs>
+
+      <Dialog
+        open={showDeleteDialog}
+        onOpenChange={(open) => {
+          if (deleting) return;
+          setShowDeleteDialog(open);
+          if (!open) setDeleteTarget(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle>删除笔记</DialogTitle>
+            <DialogDescription>
+              确定要删除「{deleteTarget?.title || "未命名笔记"}」吗？此操作无法撤销。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={deleting}
+              onClick={() => {
+                setShowDeleteDialog(false);
+                setDeleteTarget(null);
+              }}
+            >
+              取消
+            </Button>
+            <Button variant="destructive" disabled={deleting} onClick={handleDelete}>
+              删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
