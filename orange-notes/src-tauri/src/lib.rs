@@ -860,19 +860,24 @@ fn save_synced_image(
     mime: String,
     bytes: Vec<u8>,
 ) -> Result<(), AppError> {
-    // Validate filename — no path separators.
     if file_name.contains('/') || file_name.contains('\\') || file_name.is_empty() {
         return Err(AppError::Path("invalid file name".to_string()));
     }
     let path = state.img_dir.join(&file_name);
     let canonical_img = state.img_dir.canonicalize()?;
-    let canonical_path = path.canonicalize().unwrap_or(path.clone());
-    if !canonical_path.starts_with(canonical_img) {
-        return Err(AppError::Path("image path escaped img directory".to_string()));
-    }
-    // Only write if the file doesn't already exist (dedup by hash-named filename).
-    if !canonical_path.exists() {
-        fs::write(&canonical_path, &bytes)?;
+
+    if path.exists() {
+        let canonical_path = path.canonicalize()?;
+        if !canonical_path.starts_with(&canonical_img) {
+            return Err(AppError::Path("image path escaped img directory".to_string()));
+        }
+    } else {
+        fs::write(&path, &bytes)?;
+        let canonical_path = path.canonicalize()?;
+        if !canonical_path.starts_with(&canonical_img) {
+            let _ = fs::remove_file(&canonical_path);
+            return Err(AppError::Path("image path escaped img directory".to_string()));
+        }
     }
     let _ = mime; // mime is informational; filename already encodes type
     Ok(())

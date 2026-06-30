@@ -319,13 +319,18 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
 
     try {
       const response = await fetch(url, { headers: syncAuthHeaders(settings) });
-      if (!response.ok) return;
+      if (!response.ok) {
+        throw new Error(`下载图片失败: ${response.status} ${response.statusText}`);
+      }
 
       const bytes = Array.from(new Uint8Array(await response.arrayBuffer()));
       await invoke("save_synced_image", { fileName, mime, bytes });
       notifyNoteImageAvailable(fileName);
-    } catch {
-      // Remote images are retried on the next state broadcast.
+      set({ lastError: null });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      set({ lastError: message });
+      console.error(`Failed to download synced image: ${fileName}`, error);
     }
   },
 
