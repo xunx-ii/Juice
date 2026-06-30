@@ -11,6 +11,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Sidebar } from "@/components/Sidebar";
 import { NoteEditor } from "@/components/NoteEditor";
 import { useNoteStore } from "@/store/useNoteStore";
+import { useSyncStore } from "@/sync/useSyncStore";
 import { cn } from "@/lib/utils";
 
 function App() {
@@ -21,6 +22,25 @@ function App() {
   const initialize = useNoteStore((s) => s.initialize);
   const loading = useNoteStore((s) => s.loading);
   const error = useNoteStore((s) => s.error);
+  const { settings: syncSettings, pushState } = useSyncStore();
+
+  // Setup sync listener + auto-sync every 30s when settings are complete.
+  useEffect(() => {
+    const store = useNoteStore;
+    const handler = async () => {
+      if (!syncSettings.address || !syncSettings.username || !syncSettings.password) return;
+      try {
+        const payload = store.getState().getSyncPayload();
+        const result = await pushState(payload);
+        await store.getState().applyRemoteChanges(result);
+      } catch {
+        // auto-sync failure is silent
+      }
+    };
+
+    const id = window.setInterval(handler, 30_000);
+    return () => window.clearInterval(id);
+  }, [syncSettings, pushState]);
 
   useEffect(() => {
     void initialize();

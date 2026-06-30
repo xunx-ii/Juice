@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import type { Folder, Note } from "@/types/note";
+import type { RemoteFolder, RemoteNote, RemoteNotebookState } from "@/sync/protocol";
 
 interface PersistedData {
   folders: Folder[];
@@ -39,6 +40,10 @@ interface NoteStore {
   toggleSidebar: () => void;
   toggleDarkMode: () => void;
   toggleFolder: (folderId: string) => void;
+
+  // Sync helpers
+  getSyncPayload: () => RemoteNotebookState;
+  applyRemoteChanges: (state: RemoteNotebookState) => Promise<void>;
 }
 
 function readDarkMode(): boolean {
@@ -263,6 +268,68 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
         next.add(folderId);
       }
       return { expandedFolders: next };
+    });
+  },
+
+  getSyncPayload: (): RemoteNotebookState => {
+    const { folders, notes } = get();
+    return {
+      folders: folders.map((f) => ({
+        id: f.id,
+        name: f.name,
+        sort_order: f.sortOrder,
+        parent_id: f.parentId,
+        updated_at: 0,
+      })),
+      notes: notes.map((n) => ({
+        id: n.id,
+        title: n.title,
+        content: n.content,
+        folder: n.folder,
+        created_at: n.createdAt,
+        updated_at: n.updatedAt,
+        sort_order: n.sortOrder,
+        pinned: n.pinned,
+        favorite: n.favorite,
+      })),
+      deleted: [],
+      version: Date.now(),
+    };
+  },
+
+  applyRemoteChanges: async (state: RemoteNotebookState) => {
+    const folders: Folder[] = state.folders.map((rf) => ({
+      id: rf.id,
+      name: rf.name,
+      sortOrder: rf.sort_order,
+      parentId: rf.parent_id,
+    }));
+    const notes: Note[] = state.notes.map((rn) => ({
+      id: rn.id,
+      title: rn.title,
+      content: rn.content,
+      folder: rn.folder,
+      createdAt: rn.created_at,
+      updatedAt: rn.updated_at,
+      sortOrder: rn.sort_order,
+      pinned: rn.pinned,
+      favorite: rn.favorite,
+    }));
+    const deletedIds = new Set(state.deleted.map((d) => d.id));
+    set({
+      folders: folders.filter((f) => !deletedIds.has(f.id)),
+      notes: notes.filter((n) => !deletedIds.has(n.id)),
+    });
+
+    // Persist to local SQLite.
+    const { folders: f, notes: ns } = get();
+    await invoke("apply_remote_notebook", {
+      remoteFolders: state.folders,
+      remoteNotes: state.notes,
+      remoteDeleted: state.deleted,
+    }).catch((e) => {
+      // local persist failure — non-fatal, next local sync will overwrite.
+      console.warn("Failed to persist remote state locally", e);
     });
   },
 }));

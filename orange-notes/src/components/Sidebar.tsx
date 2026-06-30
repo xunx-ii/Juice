@@ -1,4 +1,4 @@
-import { Plus, FolderPlus, Settings, RefreshCw } from "lucide-react";
+import { Plus, FolderPlus, Settings, Check, Loader2, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SearchBar } from "@/components/SearchBar";
 import { TreeView } from "@/components/TreeView";
@@ -14,6 +14,99 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { useSyncStore } from "@/sync/useSyncStore";
+
+function SyncSettingsSection() {
+  const { settings, lastError, setSettings } = useSyncStore();
+  const [address, setAddress] = useState(settings.address);
+  const [username, setUsername] = useState(settings.username);
+  const [password, setPassword] = useState(settings.password);
+  const [status, setStatus] = useState<"idle" | "testing" | "ok" | "fail">("idle");
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  const handleTest = async () => {
+    if (!address || !username || !password) {
+      setStatus("fail");
+      setStatusMessage("请填写所有字段");
+      return;
+    }
+    setSettings({ address, username, password });
+    setStatus("testing");
+    setStatusMessage("正在测试连接…");
+    try {
+      const { testConnection } = useSyncStore.getState();
+      await testConnection();
+      setStatus("ok");
+      setStatusMessage("连接成功");
+    } catch (e) {
+      setStatus("fail");
+      setStatusMessage(String(e));
+    }
+  };
+
+  const handleSave = () => {
+    setSettings({ address, username, password });
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="text-sm font-medium">同步服务器</div>
+
+      <label className="block">
+        <span className="text-xs text-muted-foreground mb-1 block">服务器地址</span>
+        <Input
+          value={address}
+          onChange={(e) => setAddress(e.target.value)}
+          placeholder="例如 example.com:8777"
+        />
+      </label>
+
+      <label className="block">
+        <span className="text-xs text-muted-foreground mb-1 block">用户名</span>
+        <Input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+        />
+      </label>
+
+      <label className="block">
+        <span className="text-xs text-muted-foreground mb-1 block">密码</span>
+        <Input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+      </label>
+
+      {status !== "idle" && (
+        <div className={`text-xs ${
+          status === "fail" ? "text-destructive" : status === "ok" ? "text-emerald-500" : "text-muted-foreground"
+        }`}>
+          {statusMessage}
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <Button variant="secondary" size="sm" disabled={status === "testing"} onClick={handleTest}>
+          {status === "testing" ? (
+            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+          ) : (
+            <Check className="mr-1 h-3 w-3" />
+          )}
+          测试连接
+        </Button>
+        <Button size="sm" onClick={handleSave}>
+          <Save className="mr-1 h-3 w-3" />
+          保存
+        </Button>
+      </div>
+
+      {lastError && (
+        <div className="text-xs text-destructive">{lastError}</div>
+      )}
+    </div>
+  );
+}
 
 function SettingsDialog({
   open,
@@ -24,11 +117,10 @@ function SettingsDialog({
 }) {
   const darkMode = useNoteStore((s) => s.darkMode);
   const toggleDarkMode = useNoteStore((s) => s.toggleDarkMode);
-  const [diarySync, setDiarySync] = useState(true);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[420px]">
+      <DialogContent className="sm:max-w-[420px] max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>设置</DialogTitle>
           <DialogDescription>应用偏好设置和同步状态</DialogDescription>
@@ -50,34 +142,10 @@ function SettingsDialog({
             </Button>
           </div>
           <Separator />
-          {/* Diary Sync */}
-          <div className="flex items-center justify-between">
-            <div>
-              <span className="text-sm font-medium">日记同步</span>
-              <p className="text-xs text-muted-foreground">
-                自动同步日记到本地
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              <span
-                className={`inline-block w-2 h-2 rounded-full ${
-                  diarySync ? "bg-green-500" : "bg-red-500"
-                }`}
-              />
-              <span className="text-xs text-muted-foreground">
-                {diarySync ? "已同步" : "未同步"}
-              </span>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7"
-                onClick={() => setDiarySync(!diarySync)}
-              >
-                <RefreshCw className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-          </div>
-          <Separator />
+
+          {/* Sync Settings */}
+          <SyncSettingsSection />
+
           {/* About */}
           <div className="text-xs text-muted-foreground">
             <p>桔子笔记 v1.0.0</p>

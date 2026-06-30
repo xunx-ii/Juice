@@ -1,0 +1,16 @@
+services:
+  orange-notes-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8777:8777"
+    volumes:
+      - notes-data:/data
+    environment:
+      DATABASE_URL: /data/notes.sqlite
+      RUST_LOG: info
+
+volumes:
+  notes-data:

@@ -212,6 +212,106 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Ensures the deleted_log table exists so remote deletes can be persisted locally.
+fn add_columns_if_missing(conn: &Connection) -> Result<(), AppError> {
+    // Add deleted_log table if not exists.
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS deleted_log (
+          entity_type TEXT NOT NULL,
+          id TEXT NOT NULL,
+          deleted_at INTEGER NOT NULL,
+          PRIMARY KEY (entity_type, id)
+        );
+        ",
+    )?;
+    Ok(())
+}
+
+/// Apply remote notebook state from the sync server into the local SQLite
+/// database. Called by the frontend after a successful push/response cycle.
+/// This performs a full upsert/deletion — local state is replaced with the
+/// remote state.
+#[tauri::command]
+fn apply_remote_notebook(
+    state: tauri::State<'_, AppState>,
+    remote_folders: Vec<RemoteFolderArg>,
+    remote_notes: Vec<RemoteNoteArg>,
+    remote_deleted: Vec<RemoteDeletedArg>,
+) -> Result<(), AppError> {
+    let mut conn = state.db.lock().expect("database mutex poisoned");
+    let tx = conn.transaction()?;
+
+    tx.execute("DELETE FROM folders", [])?;
+    tx.execute("DELETE FROM notes", [])?;
+
+    let deleted_ids: HashSet<String> = remote_deleted.iter().map(|d| d.id.clone()).collect();
+
+    for f in &remote_folders {
+        if deleted_ids.contains(&f.id) {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO folders (id, name, sort_order, parent_id) VALUES ($1, $2, $3, $4)",
+            params![f.id, f.name, f.sort_order, f.parent_id],
+        )?;
+    }
+
+    for n in &remote_notes {
+        if deleted_ids.contains(&n.id) {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO notes (id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            params![
+                n.id,
+                n.title,
+                n.content,
+                n.folder,
+                n.created_at,
+                n.updated_at,
+                n.sort_order,
+                n.pinned as i64,
+                n.favorite as i64
+            ],
+        )?;
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteFolderArg {
+    id: String,
+    name: String,
+    sort_order: i64,
+    parent_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteNoteArg {
+    id: String,
+    title: String,
+    content: String,
+    folder: String,
+    created_at: i64,
+    updated_at: i64,
+    sort_order: i64,
+    pinned: bool,
+    favorite: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct RemoteDeletedArg {
+    entity_type: String,
+    id: String,
+    deleted_at: i64,
+}
+
+
 /// Migrate old databases that lack the parent_id column.
 fn migrate_add_parent_id(conn: &Connection) -> Result<(), AppError> {
     let mut cols = HashSet::new();
@@ -671,6 +771,9 @@ pub fn run() {
             let db_path = data_dir(app)?.join("notes.sqlite");
             let conn = Connection::open(db_path)?;
             init_schema(&conn)?;
+            if let Err(e) = add_columns_if_missing(&conn) {
+                eprintln!("[migration warning] {}", e);
+            }
             let img_dir = executable_img_dir(app)?;
             app.manage(AppState {
                 db: Mutex::new(conn),
@@ -691,7 +794,8 @@ pub fn run() {
             move_folder,
             save_clipboard_image,
             resolve_image_path,
-            load_note_image
+            load_note_image,
+            apply_remote_notebook
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
