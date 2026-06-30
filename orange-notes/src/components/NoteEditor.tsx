@@ -32,6 +32,8 @@ import { useNoteStore } from "@/store/useNoteStore";
 import { useDebounce } from "@/hooks/useDebounce";
 
 const IMAGE_TOKEN_RE = /!\[\[([^\]\r\n]+)\]\]/g;
+const EMPTY_EDITOR_MIN_HEIGHT = 96;
+const TEXT_SEGMENT_MIN_HEIGHT = 28;
 
 type Segment =
   | { type: "text"; value: string }
@@ -158,7 +160,7 @@ function NoteImage({
   return (
     <div
       ref={ref}
-      className="my-2 inline-flex min-h-24 min-w-40 items-center justify-center overflow-hidden rounded border bg-muted/20 align-middle"
+      className="not-prose my-1 inline-flex min-h-12 min-w-16 max-w-full items-center justify-center overflow-hidden rounded border bg-muted/20 align-top"
     >
       {src ? (
         <img
@@ -166,7 +168,11 @@ function NoteImage({
           alt=""
           loading="lazy"
           decoding="async"
-          className={className ?? "max-h-[560px] max-w-full object-contain"}
+          className={
+            className
+              ? `m-0 block ${className}`
+              : "m-0 block max-h-[560px] max-w-full object-contain"
+          }
         />
       ) : null}
     </div>
@@ -176,9 +182,11 @@ function NoteImage({
 function TextSegmentEditor({
   value,
   onChange,
+  expanded,
 }: {
   value: string;
   onChange: (value: string) => void;
+  expanded: boolean;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
 
@@ -186,8 +194,9 @@ function TextSegmentEditor({
     const textarea = ref.current;
     if (!textarea) return;
     textarea.style.height = "0px";
-    textarea.style.height = `${Math.max(textarea.scrollHeight, 96)}px`;
-  }, [value]);
+    const minHeight = expanded ? EMPTY_EDITOR_MIN_HEIGHT : TEXT_SEGMENT_MIN_HEIGHT;
+    textarea.style.height = `${Math.max(textarea.scrollHeight, minHeight)}px`;
+  }, [expanded, value]);
 
   return (
     <textarea
@@ -271,6 +280,7 @@ function LiveEditor({
             <TextSegmentEditor
               key={`text-${index}`}
               value={segment.value}
+              expanded={segments.length === 1}
               onChange={(value) => updateTextSegment(index, value)}
             />
           )
