@@ -167,6 +167,23 @@ fn cleanup_unreferenced_images(
     Ok(deleted)
 }
 
+fn local_image_file_names(img_dir: &PathBuf) -> Result<HashSet<String>, AppError> {
+    let mut names = HashSet::new();
+    for entry in fs::read_dir(img_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let Some(file_name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !file_name.is_empty() && !file_name.contains('/') && !file_name.contains('\\') {
+            names.insert(file_name);
+        }
+    }
+    Ok(names)
+}
+
 fn data_dir(app: &tauri::App) -> Result<PathBuf, AppError> {
     let dir = app
         .path()
@@ -257,6 +274,12 @@ fn apply_remote_notebook(
         .difference(&remote_images)
         .cloned()
         .collect::<HashSet<_>>();
+    let mut cleanup_candidates = removed_images;
+    for file_name in local_image_file_names(&state.img_dir)? {
+        if !remote_images.contains(&file_name) {
+            cleanup_candidates.insert(file_name);
+        }
+    }
 
     let tx = conn.transaction()?;
 
@@ -298,7 +321,7 @@ fn apply_remote_notebook(
         tx.execute("DELETE FROM sync_changes", [])?;
     }
     tx.commit()?;
-    cleanup_unreferenced_images(&conn, &state.img_dir, removed_images)
+    cleanup_unreferenced_images(&conn, &state.img_dir, cleanup_candidates)
 }
 
 #[tauri::command]
@@ -875,6 +898,14 @@ fn image_file_exists(state: tauri::State<'_, AppState>, file_name: String) -> Re
     Ok(path.exists())
 }
 
+#[tauri::command]
+fn cleanup_unreferenced_note_images(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<String>, AppError> {
+    let conn = state.db.lock().expect("database mutex poisoned");
+    cleanup_unreferenced_images(&conn, &state.img_dir, local_image_file_names(&state.img_dir)?)
+}
+
 /// Save a downloaded image to the local img directory (for syncing from server).
 #[tauri::command]
 fn save_synced_image(
@@ -934,6 +965,7 @@ pub fn run() {
             load_note_image,
             read_note_image_bytes,
             image_file_exists,
+            cleanup_unreferenced_note_images,
             save_synced_image,
             apply_remote_notebook,
             set_sync_version,

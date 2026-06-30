@@ -364,12 +364,17 @@ export function NoteEditor() {
   const syncedNoteIdRef = useRef<string | null>(null);
   const contentDirtyRef = useRef(false);
   const titleDirtyRef = useRef(false);
+  const contentRef = useRef("");
   const skipNextContentSaveRef = useRef(false);
   const skipNextTitleSaveRef = useRef(false);
   const pasteLockRef = useRef(false);
   const deleteInFlightRef = useRef(false);
   const debouncedContent = useDebounce(content, 500);
   const debouncedTitle = useDebounce(title, 500);
+
+  useEffect(() => {
+    contentRef.current = content;
+  }, [content]);
 
   useEffect(() => {
     if (
@@ -494,6 +499,8 @@ export function NoteEditor() {
 
     const file = imageItem.getAsFile();
     if (!file) return;
+    const targetNoteId = activeNoteId;
+    if (!targetNoteId) return;
 
     pasteLockRef.current = true;
     event.preventDefault();
@@ -506,17 +513,19 @@ export function NoteEditor() {
         base64Data,
       });
       imageUrlCache.set(saved.fileName, URL.createObjectURL(file));
-      setContent((prev) => {
-        contentDirtyRef.current = true;
-        const prefix = prev.length === 0 || prev.endsWith("\n") ? "" : "\n";
-        return `${prev}${prefix}${imageToken(saved.fileName)}\n`;
-      });
+      contentDirtyRef.current = true;
+      const currentContent = contentRef.current;
+      const prefix = currentContent.length === 0 || currentContent.endsWith("\n") ? "" : "\n";
+      const nextContent = `${currentContent}${prefix}${imageToken(saved.fileName)}\n`;
+      setContent(nextContent);
+      skipNextContentSaveRef.current = true;
+      void updateNote(targetNoteId, { content: nextContent });
     } finally {
       window.setTimeout(() => {
         pasteLockRef.current = false;
       }, 0);
     }
-  }, []);
+  }, [activeNoteId, updateNote]);
 
   if (!activeNote) {
     return (

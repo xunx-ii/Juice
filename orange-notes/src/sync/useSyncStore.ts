@@ -3,7 +3,10 @@ import { create } from "zustand";
 import type { RemoteAttachmentMeta } from "./protocol";
 import { syncClient, SyncClient, type RemoteStateMessage } from "./client";
 import { useNoteStore } from "../store/useNoteStore";
-import { notifyNoteImageAvailable } from "@/lib/noteImageEvents";
+import {
+  notifyNoteImageAvailable,
+  notifyNoteImagesDeleted,
+} from "@/lib/noteImageEvents";
 
 const IMAGE_TOKEN_RE = /!\[\[([^\]\r\n]+)\]\]/g;
 const STORAGE_KEY = "orange-notes-sync-settings";
@@ -38,6 +41,7 @@ export interface SyncStore {
   pushNow: () => Promise<void>;
   schedulePush: () => void;
   syncImages: () => Promise<void>;
+  cleanupLocalImages: () => Promise<void>;
   downloadImage: (fileName: string, mime: string) => Promise<void>;
   downloadNewImages: (attachments: RemoteAttachmentMeta[]) => Promise<void>;
 }
@@ -129,6 +133,7 @@ function scheduleReconnect() {
 
 async function applyRemoteState(message: RemoteStateMessage) {
   await useNoteStore.getState().applyRemoteChanges(message.state);
+  await useSyncStore.getState().cleanupLocalImages();
   await useSyncStore.getState().downloadNewImages(filterReferencedAttachments(message));
   useSyncStore.setState({
     lastSync: Date.now(),
@@ -140,6 +145,7 @@ async function applyRemoteState(message: RemoteStateMessage) {
 
 async function mergeRejectedState(message: RemoteStateMessage) {
   await useNoteStore.getState().mergeRemoteSnapshot(message.state);
+  await useSyncStore.getState().cleanupLocalImages();
   await useSyncStore.getState().downloadNewImages(filterReferencedAttachments(message));
 }
 
@@ -154,6 +160,9 @@ async function applyIncomingState(message: RemoteStateMessage) {
   }
 
   if (message.state.version <= localVersion) {
+    if (!noteStore.hasLocalChanges()) {
+      await store.cleanupLocalImages();
+    }
     await store.downloadNewImages(filterReferencedAttachments(message));
     return;
   }
@@ -322,6 +331,15 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
       } catch {
         // Missing local images should not block note state sync.
       }
+    }
+  },
+
+  cleanupLocalImages: async () => {
+    try {
+      const deletedImages = await invoke<string[]>("cleanup_unreferenced_note_images");
+      notifyNoteImagesDeleted(deletedImages);
+    } catch (error) {
+      console.warn("Failed to cleanup local note images", error);
     }
   },
 
