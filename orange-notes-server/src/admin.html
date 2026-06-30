@@ -47,7 +47,6 @@
     <div class="card"><h3>文件夹总数</h3><div class="value" id="folder-count">—</div></div>
     <div class="card"><h3>笔记总数</h3><div class="value" id="note-count">—</div></div>
     <div class="card"><h3>注册用户</h3><div class="value" id="user-count">—</div></div>
-    <div class="card"><h3>已删除</h3><div class="value" id="deleted-count">—</div></div>
     <div class="card"><h3>在线连接</h3><div class="value online" id="ws-count">—</div></div>
     <div class="card"><h3>运行时间</h3><div class="value" id="uptime">—</div></div>
   </div>
@@ -153,7 +152,6 @@ async function loadStats() {
     document.getElementById('folder-count').textContent = info.folder_count ?? 0;
     document.getElementById('note-count').textContent = info.note_count ?? 0;
     document.getElementById('user-count').textContent = info.user_count ?? 0;
-    document.getElementById('deleted-count').textContent = info.deleted_count ?? 0;
     document.getElementById('ws-count').textContent = info.active_ws_clients ?? 0;
     document.getElementById('uptime').textContent = fmtUptime(info.uptime_seconds ?? 0);
     document.getElementById('version').textContent = info.version ?? '—';

@@ -16,7 +16,16 @@ import { Input } from "@/components/ui/input";
 import { useSyncStore } from "@/sync/useSyncStore";
 
 function SyncSettingsSection() {
-  const { settings, lastError, lastSync, setSettings, testing, syncing, startSync } = useSyncStore();
+  const {
+    settings,
+    lastError,
+    lastSync,
+    setSettings,
+    syncing,
+    pushNow,
+    connectRealtime,
+    authenticated,
+  } = useSyncStore();
   const [address, setAddress] = useState(settings.address);
   const [username, setUsername] = useState(settings.username);
   const [password, setPassword] = useState(settings.password);
@@ -83,16 +92,12 @@ function SyncSettingsSection() {
     setStatus("testing");
     setStatusMessage("正在连接并认证…");
     try {
-      const { testConnection } = useSyncStore.getState();
-      await testConnection();
+      await connectRealtime();
       setStatus("ok");
-      setStatusMessage("连接成功！");
+      setStatusMessage("实时同步已连接");
     } catch (e) {
       setStatus("fail");
       setStatusMessage(e instanceof Error ? e.message : String(e));
-      // Ensure store testing flag is reset even if testConnection throws
-      // unexpectedly before reaching its own cleanup.
-      useSyncStore.getState().setState({ testing: false });
     }
   };
 
@@ -145,13 +150,13 @@ function SyncSettingsSection() {
       )}
 
       <div className="flex gap-2">
-        <Button variant="secondary" size="sm" disabled={testing} onClick={handleTest}>
-          {testing ? (
+        <Button variant="secondary" size="sm" disabled={status === "testing" || syncing} onClick={handleTest}>
+          {status === "testing" ? (
             <Loader2 className="mr-1 h-3 w-3 animate-spin" />
           ) : (
             <Check className="mr-1 h-3 w-3" />
           )}
-          测试连接
+          {authenticated ? "已连接" : "连接"}
         </Button>
         <Button size="sm" onClick={handleSave}>
           <Save className="mr-1 h-3 w-3" />
@@ -160,8 +165,8 @@ function SyncSettingsSection() {
         <Button
           size="sm"
           variant="outline"
-          disabled={syncing || testing}
-          onClick={startSync}
+          disabled={syncing || status === "testing"}
+          onClick={pushNow}
           title="立即同步笔记"
         >
           {syncing ? (

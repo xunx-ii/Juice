@@ -60,6 +60,11 @@ struct Note {
 struct NotebookData {
     folders: Vec<Folder>,
     notes: Vec<Note>,
+    sync_version: i64,
+    dirty_notes: Vec<String>,
+    dirty_folders: Vec<String>,
+    deleted_notes: Vec<String>,
+    deleted_folders: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,38 +211,30 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
           favorite INTEGER NOT NULL DEFAULT 0,
           FOREIGN KEY(folder) REFERENCES folders(id) ON DELETE CASCADE
         );
-        ",
-    )?;
-    migrate_add_parent_id(conn)?;
-    Ok(())
-}
 
-/// Ensures the deleted_log table exists so remote deletes can be persisted locally.
-fn add_columns_if_missing(conn: &Connection) -> Result<(), AppError> {
-    // Add deleted_log table if not exists.
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS deleted_log (
+        CREATE TABLE IF NOT EXISTS sync_meta (
+          key TEXT PRIMARY KEY,
+          value INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sync_changes (
           entity_type TEXT NOT NULL,
-          id TEXT NOT NULL,
-          deleted_at INTEGER NOT NULL,
-          PRIMARY KEY (entity_type, id)
+          entity_id TEXT NOT NULL,
+          operation TEXT NOT NULL,
+          PRIMARY KEY (entity_type, entity_id, operation)
         );
         ",
     )?;
     Ok(())
 }
 
-/// Apply remote notebook state from the sync server into the local SQLite
-/// database. Called by the frontend after a successful push/response cycle.
-/// This performs a full upsert/deletion — local state is replaced with the
-/// remote state.
 #[tauri::command]
 fn apply_remote_notebook(
     state: tauri::State<'_, AppState>,
     remote_folders: Vec<RemoteFolderArg>,
     remote_notes: Vec<RemoteNoteArg>,
-    remote_deleted: Vec<RemoteDeletedArg>,
+    version: i64,
+    clear_changes: bool,
 ) -> Result<(), AppError> {
     let mut conn = state.db.lock().expect("database mutex poisoned");
     let tx = conn.transaction()?;
@@ -245,21 +242,7 @@ fn apply_remote_notebook(
     tx.execute("DELETE FROM notes", [])?;
     tx.execute("DELETE FROM folders", [])?;
 
-    let deleted_folders: HashSet<String> = remote_deleted
-        .iter()
-        .filter(|d| d.entity_type == "folder")
-        .map(|d| d.id.clone())
-        .collect();
-    let deleted_notes: HashSet<String> = remote_deleted
-        .iter()
-        .filter(|d| d.entity_type == "note")
-        .map(|d| d.id.clone())
-        .collect();
-
     for f in &remote_folders {
-        if deleted_folders.contains(&f.id) {
-            continue;
-        }
         tx.execute(
             "INSERT INTO folders (id, name, sort_order, parent_id) VALUES ($1, $2, $3, $4)",
             params![f.id, f.name, f.sort_order, f.parent_id],
@@ -267,9 +250,6 @@ fn apply_remote_notebook(
     }
 
     for n in &remote_notes {
-        if deleted_notes.contains(&n.id) || deleted_folders.contains(&n.folder) {
-            continue;
-        }
         tx.execute(
             "INSERT INTO notes (id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
@@ -284,6 +264,71 @@ fn apply_remote_notebook(
                 n.pinned as i64,
                 n.favorite as i64
             ],
+        )?;
+    }
+
+    tx.execute(
+        "INSERT INTO sync_meta (key, value)
+         VALUES ('notebook_version', $1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![version],
+    )?;
+    if clear_changes {
+        tx.execute("DELETE FROM sync_changes", [])?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_sync_version(state: tauri::State<'_, AppState>, version: i64) -> Result<(), AppError> {
+    let mut conn = state.db.lock().expect("database mutex poisoned");
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO sync_meta (key, value)
+         VALUES ('notebook_version', $1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![version],
+    )?;
+    tx.execute("DELETE FROM sync_changes", [])?;
+    tx.commit()?;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_sync_markers(
+    state: tauri::State<'_, AppState>,
+    dirty_notes: Vec<String>,
+    dirty_folders: Vec<String>,
+    deleted_notes: Vec<String>,
+    deleted_folders: Vec<String>,
+) -> Result<(), AppError> {
+    let mut conn = state.db.lock().expect("database mutex poisoned");
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM sync_changes", [])?;
+
+    for id in dirty_notes {
+        tx.execute(
+            "INSERT INTO sync_changes (entity_type, entity_id, operation) VALUES ('note', $1, 'dirty')",
+            params![id],
+        )?;
+    }
+    for id in dirty_folders {
+        tx.execute(
+            "INSERT INTO sync_changes (entity_type, entity_id, operation) VALUES ('folder', $1, 'dirty')",
+            params![id],
+        )?;
+    }
+    for id in deleted_notes {
+        tx.execute(
+            "INSERT INTO sync_changes (entity_type, entity_id, operation) VALUES ('note', $1, 'deleted')",
+            params![id],
+        )?;
+    }
+    for id in deleted_folders {
+        tx.execute(
+            "INSERT INTO sync_changes (entity_type, entity_id, operation) VALUES ('folder', $1, 'deleted')",
+            params![id],
         )?;
     }
 
@@ -310,35 +355,6 @@ struct RemoteNoteArg {
     sort_order: i64,
     pinned: bool,
     favorite: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct RemoteDeletedArg {
-    entity_type: String,
-    id: String,
-    deleted_at: i64,
-}
-
-
-/// Migrate old databases that lack the parent_id column.
-fn migrate_add_parent_id(conn: &Connection) -> Result<(), AppError> {
-    let mut cols = HashSet::new();
-    let mut stmt = conn.prepare("PRAGMA table_info(folders)")?;
-    let rows = stmt.query_map([], |row| {
-        let name: String = row.get(1)?;
-        Ok(name)
-    })?;
-    for name in rows {
-        cols.insert(name?);
-    }
-    if !cols.contains("parent_id") {
-        conn.execute(
-            "ALTER TABLE folders ADD COLUMN parent_id TEXT",
-            [],
-        )?;
-    }
-    Ok(())
 }
 
 fn read_all(conn: &Connection) -> Result<NotebookData, AppError> {
@@ -376,7 +392,33 @@ fn read_all(conn: &Connection) -> Result<NotebookData, AppError> {
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(NotebookData { folders, notes })
+    let sync_version = conn
+        .query_row(
+            "SELECT value FROM sync_meta WHERE key = 'notebook_version'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+
+    let read_changes = |entity_type: &str, operation: &str| -> Result<Vec<String>, AppError> {
+        let mut stmt = conn.prepare(
+            "SELECT entity_id FROM sync_changes WHERE entity_type = $1 AND operation = $2 ORDER BY entity_id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![entity_type, operation], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    };
+
+    Ok(NotebookData {
+        folders,
+        notes,
+        sync_version,
+        dirty_notes: read_changes("note", "dirty")?,
+        dirty_folders: read_changes("folder", "dirty")?,
+        deleted_notes: read_changes("note", "deleted")?,
+        deleted_folders: read_changes("folder", "deleted")?,
+    })
 }
 
 #[tauri::command]
@@ -774,17 +816,6 @@ fn save_clipboard_image(
 }
 
 #[tauri::command]
-fn resolve_image_path(state: tauri::State<'_, AppState>, file_name: String) -> Result<String, AppError> {
-    let path = state.img_dir.join(file_name);
-    let canonical_img = state.img_dir.canonicalize()?;
-    let canonical_path = path.canonicalize()?;
-    if !canonical_path.starts_with(canonical_img) {
-        return Err(AppError::Path("image path escaped img directory".to_string()));
-    }
-    Ok(canonical_path.to_string_lossy().to_string())
-}
-
-#[tauri::command]
 fn load_note_image(state: tauri::State<'_, AppState>, file_name: String) -> Result<ImagePayload, AppError> {
     let path = state.img_dir.join(&file_name);
     let canonical_img = state.img_dir.canonicalize()?;
@@ -853,9 +884,6 @@ pub fn run() {
             let db_path = data_dir(app)?.join("notes.sqlite");
             let conn = Connection::open(db_path)?;
             init_schema(&conn)?;
-            if let Err(e) = add_columns_if_missing(&conn) {
-                eprintln!("[migration warning] {}", e);
-            }
             let img_dir = executable_img_dir(app)?;
             app.manage(AppState {
                 db: Mutex::new(conn),
@@ -875,12 +903,13 @@ pub fn run() {
             reorder_folder,
             move_folder,
             save_clipboard_image,
-            resolve_image_path,
             load_note_image,
             read_note_image_bytes,
             image_file_exists,
             save_synced_image,
-            apply_remote_notebook
+            apply_remote_notebook,
+            set_sync_version,
+            set_sync_markers
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

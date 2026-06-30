@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import {
   PanelLeft,
   PanelRight,
@@ -22,28 +22,16 @@ function App() {
   const initialize = useNoteStore((s) => s.initialize);
   const loading = useNoteStore((s) => s.loading);
   const error = useNoteStore((s) => s.error);
-  const startSync = useSyncStore((s) => s.startSync);
-
-  // Auto-sync every 30s when settings are complete.
-  const startSyncRef = useRef(startSync);
-  useEffect(() => {
-    startSyncRef.current = startSync;
-  }, [startSync]);
+  const connectRealtime = useSyncStore((s) => s.connectRealtime);
 
   useEffect(() => {
-    const handler = async () => {
-      const { settings: s, syncing } = useSyncStore.getState();
-      if (!s.address || !s.username || !s.password || syncing) return;
-      await startSyncRef.current();
-    };
-
-    const id = window.setInterval(handler, 30_000);
-    return () => window.clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    void initialize();
-  }, [initialize]);
+    void initialize().then(() => {
+      const { settings } = useSyncStore.getState();
+      if (settings.address && settings.username && settings.password) {
+        void connectRealtime().catch(() => {});
+      }
+    });
+  }, [connectRealtime, initialize]);
 
   // Apply dark mode class
   useEffect(() => {

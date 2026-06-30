@@ -1,6 +1,5 @@
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
-use std::collections::HashSet;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -29,15 +28,7 @@ pub struct Note {
 pub struct NotebookState {
     pub folders: Vec<Folder>,
     pub notes: Vec<Note>,
-    pub deleted: Vec<DeletedChange>,
     pub version: i64,
-}
-
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-pub struct DeletedChange {
-    pub entity_type: String,
-    pub id: String,
-    pub deleted_at: i64,
 }
 
 pub struct Database {
@@ -105,25 +96,27 @@ impl Database {
 
     pub async fn create_user(&self, username: String, password_hash: String) -> Result<(), rusqlite::Error> {
         self.conn(move |conn| {
-            conn.execute(
+            let tx = conn.transaction()?;
+            tx.execute(
                 "INSERT OR IGNORE INTO users (username, password_hash) VALUES (?1, ?2)",
                 params![username, password_hash],
             )?;
-            Ok(())
+            tx.execute(
+                "INSERT OR IGNORE INTO sync_meta (user_id, version) VALUES (?1, 0)",
+                params![username],
+            )?;
+            tx.commit()
         }).await
     }
 
-    /// Delete a user and all data owned by that user (folders, notes, deleted_log).
+    /// Delete a user and all data owned by that user.
     pub async fn delete_user(&self, username: &str) -> Result<bool, rusqlite::Error> {
         let username = username.to_string();
         self.conn(move |conn| {
-            // Delete notes owned by this user.
             conn.execute("DELETE FROM notes WHERE user_id = ?1", params![username.clone()])?;
-            // Delete folders owned by this user.
             conn.execute("DELETE FROM folders WHERE user_id = ?1", params![username.clone()])?;
-            // Delete deleted_log entries owned by this user.
-            conn.execute("DELETE FROM deleted_log WHERE user_id = ?1", params![username.clone()])?;
-            // Delete the user row itself.
+            conn.execute("DELETE FROM attachments WHERE user_id = ?1", params![username.clone()])?;
+            conn.execute("DELETE FROM sync_meta WHERE user_id = ?1", params![username.clone()])?;
             let deleted = conn.execute("DELETE FROM users WHERE username = ?1", params![username])?;
             Ok(deleted > 0)
         }).await
@@ -135,74 +128,57 @@ impl Database {
 
     pub async fn get_state(&self, user_id: &str) -> Result<NotebookState, rusqlite::Error> {
         let user_id = user_id.to_string();
-        let folders = self.get_folders(&user_id).await?;
-        let notes = self.get_notes(&user_id).await?;
-        let deleted = self.get_deleted(&user_id).await?;
-        let version = chrono::Utc::now().timestamp_millis();
-        Ok(NotebookState {
-            folders,
-            notes,
-            deleted,
-            version,
-        })
-    }
-
-    pub async fn get_folders(&self, user_id: &str) -> Result<Vec<Folder>, rusqlite::Error> {
-        let user_id = user_id.to_string();
         self.conn(move |conn| {
-            let mut stmt = conn.prepare(
+            let version = conn
+                .query_row(
+                    "SELECT version FROM sync_meta WHERE user_id = ?1",
+                    params![user_id.clone()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+
+            let folders = {
+                let mut stmt = conn.prepare(
                 "SELECT id, name, sort_order, parent_id, updated_at FROM folders WHERE user_id = ?1 ORDER BY sort_order ASC",
-            )?;
-            let rows = stmt.query_map(params![user_id], |row| {
-                Ok(Folder {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    sort_order: row.get(2)?,
-                    parent_id: row.get(3)?,
-                    updated_at: row.get(4)?,
-                })
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()
-        }).await
-    }
+                )?;
+                let rows = stmt.query_map(params![user_id.clone()], |row| {
+                    Ok(Folder {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        sort_order: row.get(2)?,
+                        parent_id: row.get(3)?,
+                        updated_at: row.get(4)?,
+                    })
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
 
-    pub async fn get_notes(&self, user_id: &str) -> Result<Vec<Note>, rusqlite::Error> {
-        let user_id = user_id.to_string();
-        self.conn(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite FROM notes WHERE user_id = ?1 ORDER BY folder ASC, sort_order ASC",
-            )?;
-            let rows = stmt.query_map(params![user_id], |row| {
-                Ok(Note {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    content: row.get(2)?,
-                    folder: row.get(3)?,
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
-                    sort_order: row.get(6)?,
-                    pinned: row.get::<_, i64>(7)? != 0,
-                    favorite: row.get::<_, i64>(8)? != 0,
-                })
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()
-        }).await
-    }
+            let notes = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite FROM notes WHERE user_id = ?1 ORDER BY folder ASC, sort_order ASC",
+                )?;
+                let rows = stmt.query_map(params![user_id], |row| {
+                    Ok(Note {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        content: row.get(2)?,
+                        folder: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                        sort_order: row.get(6)?,
+                        pinned: row.get::<_, i64>(7)? != 0,
+                        favorite: row.get::<_, i64>(8)? != 0,
+                    })
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
 
-    pub async fn get_deleted(&self, user_id: &str) -> Result<Vec<DeletedChange>, rusqlite::Error> {
-        let user_id = user_id.to_string();
-        self.conn(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT entity_type, id, deleted_at FROM deleted_log WHERE user_id = ?1 ORDER BY deleted_at ASC",
-            )?;
-            let rows = stmt.query_map(params![user_id], |row| {
-                Ok(DeletedChange {
-                    entity_type: row.get(0)?,
-                    id: row.get(1)?,
-                    deleted_at: row.get(2)?,
-                })
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()
+            Ok(NotebookState {
+                folders,
+                notes,
+                version,
+            })
         }).await
     }
 
@@ -210,114 +186,81 @@ impl Database {
     // Mutations (scoped to a user)
     // -----------------------------------------------------------------------
 
-    pub async fn upsert_folder(&self, user_id: String, folder: Folder) -> Result<(), rusqlite::Error> {
-        self.conn(move |conn| {
-            conn.execute(
-                "INSERT INTO folders (id, name, sort_order, parent_id, updated_at, user_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                 ON CONFLICT(id) DO UPDATE SET
-                   name = excluded.name,
-                   sort_order = excluded.sort_order,
-                   parent_id = excluded.parent_id,
-                   updated_at = excluded.updated_at",
-                params![
-                    folder.id,
-                    folder.name,
-                    folder.sort_order,
-                    folder.parent_id,
-                    folder.updated_at,
-                    user_id,
-                ],
-            )?;
-            Ok(())
-        }).await
-    }
-
-    pub async fn upsert_note(&self, user_id: String, note: Note) -> Result<(), rusqlite::Error> {
-        self.conn(move |conn| {
-            conn.execute(
-                "INSERT INTO notes (id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite, user_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-                 ON CONFLICT(id) DO UPDATE SET
-                   title = excluded.title,
-                   content = excluded.content,
-                   folder = excluded.folder,
-                   created_at = excluded.created_at,
-                   updated_at = excluded.updated_at,
-                   sort_order = excluded.sort_order,
-                   pinned = excluded.pinned,
-                   favorite = excluded.favorite",
-                params![
-                    note.id,
-                    note.title,
-                    note.content,
-                    note.folder,
-                    note.created_at,
-                    note.updated_at,
-                    note.sort_order,
-                    note.pinned as i64,
-                    note.favorite as i64,
-                    user_id,
-                ],
-            )?;
-            Ok(())
-        }).await
-    }
-
-    pub async fn delete_entity(
+    pub async fn replace_state_if_version(
         &self,
         user_id: String,
-        entity_type: String,
-        id: String,
-    ) -> Result<(), rusqlite::Error> {
+        state: NotebookState,
+        base_version: i64,
+    ) -> Result<Option<i64>, rusqlite::Error> {
         self.conn(move |conn| {
-            match entity_type.as_str() {
-                "folder" => {
-                    let mut folder_ids = Vec::new();
-                    let mut folder_queue = vec![id.clone()];
-                    let mut seen_folder_ids = HashSet::new();
-                    while let Some(parent_id) = folder_queue.pop() {
-                        if !seen_folder_ids.insert(parent_id.clone()) {
-                            continue;
-                        }
-                        folder_ids.push(parent_id.clone());
+            let tx = conn.transaction()?;
+            let current_version = tx
+                .query_row(
+                    "SELECT version FROM sync_meta WHERE user_id = ?1",
+                    params![user_id.clone()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .unwrap_or(0);
 
-                        let child_ids = {
-                            let mut stmt = conn.prepare(
-                                "SELECT id FROM folders WHERE parent_id = ?1 AND user_id = ?2",
-                            )?;
-                            let rows = stmt
-                                .query_map(params![parent_id, user_id.clone()], |row| {
-                                    row.get::<_, String>(0)
-                                })?
-                                .collect::<Result<Vec<_>, _>>()?;
-                            rows
-                        };
-                        folder_queue.extend(child_ids);
-                    }
-
-                    for folder_id in folder_ids.iter().rev() {
-                        conn.execute(
-                            "DELETE FROM notes WHERE folder = ?1 AND user_id = ?2",
-                            params![folder_id, user_id.clone()],
-                        )?;
-                        conn.execute(
-                            "DELETE FROM folders WHERE id = ?1 AND user_id = ?2",
-                            params![folder_id, user_id.clone()],
-                        )?;
-                    }
-                }
-                "note" => {
-                    conn.execute("DELETE FROM notes WHERE id = ?1 AND user_id = ?2", params![id, user_id.clone()])?;
-                }
-                _ => {}
+            if current_version != base_version {
+                return Ok(None);
             }
-            let deleted_at = chrono::Utc::now().timestamp_millis();
-            conn.execute(
-                "INSERT OR REPLACE INTO deleted_log (entity_type, id, deleted_at, user_id) VALUES (?1, ?2, ?3, ?4)",
-                params![entity_type, id, deleted_at, user_id.clone()],
+
+            let next_version = [
+                current_version.saturating_add(1),
+                state.version,
+                chrono::Utc::now().timestamp_millis(),
+            ]
+            .into_iter()
+            .max()
+            .unwrap_or(1);
+
+            tx.execute("DELETE FROM notes WHERE user_id = ?1", params![user_id.clone()])?;
+            tx.execute("DELETE FROM folders WHERE user_id = ?1", params![user_id.clone()])?;
+
+            for folder in state.folders {
+                tx.execute(
+                    "INSERT INTO folders (id, name, sort_order, parent_id, updated_at, user_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        folder.id,
+                        folder.name,
+                        folder.sort_order,
+                        folder.parent_id,
+                        folder.updated_at,
+                        user_id.clone(),
+                    ],
+                )?;
+            }
+
+            for note in state.notes {
+                tx.execute(
+                    "INSERT INTO notes (id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite, user_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        note.id,
+                        note.title,
+                        note.content,
+                        note.folder,
+                        note.created_at,
+                        note.updated_at,
+                        note.sort_order,
+                        note.pinned as i64,
+                        note.favorite as i64,
+                        user_id.clone(),
+                    ],
+                )?;
+            }
+
+            tx.execute(
+                "INSERT INTO sync_meta (user_id, version)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(user_id) DO UPDATE SET version = excluded.version",
+                params![user_id, next_version],
             )?;
-            Ok(())
+            tx.commit()?;
+            Ok(Some(next_version))
         }).await
     }
 
@@ -395,11 +338,6 @@ impl Database {
 }
 
 fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
-    // Migration: add user_id column if it doesn't exist yet (existing databases).
-    let _ = conn.execute("ALTER TABLE folders ADD COLUMN user_id TEXT NOT NULL DEFAULT ''", []);
-    let _ = conn.execute("ALTER TABLE notes ADD COLUMN user_id TEXT NOT NULL DEFAULT ''", []);
-    let _ = conn.execute("ALTER TABLE deleted_log ADD COLUMN user_id TEXT NOT NULL DEFAULT ''", []);
-
     conn.execute_batch("
         PRAGMA journal_mode = WAL;
         PRAGMA foreign_keys = ON;
@@ -432,14 +370,6 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           FOREIGN KEY(folder) REFERENCES folders(id) ON DELETE CASCADE
         );
 
-        CREATE TABLE IF NOT EXISTS deleted_log (
-          entity_type TEXT NOT NULL,
-          id TEXT NOT NULL,
-          deleted_at INTEGER NOT NULL,
-          user_id TEXT NOT NULL DEFAULT '',
-          PRIMARY KEY (user_id, entity_type, id)
-        );
-
         CREATE TABLE IF NOT EXISTS attachments (
           user_id TEXT NOT NULL,
           file_name TEXT NOT NULL,
@@ -448,48 +378,10 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           updated_at INTEGER NOT NULL,
           PRIMARY KEY (user_id, file_name)
         );
-    ")?;
 
-    migrate_deleted_log_primary_key(conn)?;
-    Ok(())
-}
-
-fn migrate_deleted_log_primary_key(conn: &Connection) -> Result<(), rusqlite::Error> {
-    let mut columns = Vec::new();
-    {
-        let mut stmt = conn.prepare("PRAGMA table_info(deleted_log)")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
-        })?;
-        for row in rows {
-            columns.push(row?);
-        }
-    }
-
-    let has_user_id_in_pk = columns
-        .iter()
-        .any(|(name, primary_key_order)| name == "user_id" && *primary_key_order > 0);
-    if has_user_id_in_pk {
-        return Ok(());
-    }
-
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS deleted_log_next (
-          entity_type TEXT NOT NULL,
-          id TEXT NOT NULL,
-          deleted_at INTEGER NOT NULL,
-          user_id TEXT NOT NULL DEFAULT '',
-          PRIMARY KEY (user_id, entity_type, id)
+        CREATE TABLE IF NOT EXISTS sync_meta (
+          user_id TEXT PRIMARY KEY,
+          version INTEGER NOT NULL
         );
-
-        INSERT OR REPLACE INTO deleted_log_next (entity_type, id, deleted_at, user_id)
-        SELECT entity_type, id, deleted_at, user_id FROM deleted_log;
-
-        DROP TABLE deleted_log;
-        ALTER TABLE deleted_log_next RENAME TO deleted_log;
-        ",
-    )?;
-
-    Ok(())
+    ")
 }

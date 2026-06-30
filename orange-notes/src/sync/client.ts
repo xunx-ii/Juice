@@ -1,15 +1,31 @@
-// WebSocket sync client. Handles connect, authenticate, push, and fetching
-// remote state from the orange-notes-server.
-
 import type {
   ClientMessage,
+  RemoteAttachmentMeta,
   RemoteNotebookState,
   ServerMessage,
 } from "./protocol";
-import { useSyncStore } from "./useSyncStore";
 
-type Listener = (connected: boolean, error?: string) => void;
-type StateHandler = (state: RemoteNotebookState) => void;
+export interface RemoteStateMessage {
+  state: RemoteNotebookState;
+  attachments: RemoteAttachmentMeta[];
+}
+
+type ConnectionListener = (snapshot: {
+  connected: boolean;
+  authenticated: boolean;
+  error: string | null;
+}) => void;
+type StateHandler = (message: RemoteStateMessage) => void;
+
+type PushResult =
+  | { accepted: true; version: number }
+  | { accepted: false; remote: RemoteStateMessage };
+
+interface PendingPush {
+  resolve: (result: PushResult) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
 
 export class SyncClient {
   private ws: WebSocket | null = null;
@@ -17,14 +33,13 @@ export class SyncClient {
   private username: string | null = null;
   private password: string | null = null;
   private authenticated = false;
-  private pendingPush: RemoteNotebookState | null = null;
-  private pendingResolve: ((state: RemoteNotebookState) => void) | null = null;
-  private pendingReject: ((error: Error) => void) | null = null;
-  private listeners: Set<Listener> = new Set();
-  private stateHandlers: Set<StateHandler> = new Set();
-  private reconnectHandler: ReturnType<typeof setTimeout> | null = null;
+  private connectPromise: Promise<void> | null = null;
   private connectResolve: (() => void) | null = null;
-  private connectReject: ((err: Error) => void) | null = null;
+  private connectReject: ((error: Error) => void) | null = null;
+  private connectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingPushes: PendingPush[] = [];
+  private listeners = new Set<ConnectionListener>();
+  private stateHandlers = new Set<StateHandler>();
 
   isConnected() {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
@@ -34,11 +49,11 @@ export class SyncClient {
     return this.authenticated;
   }
 
-  addListener(listener: Listener) {
+  addListener(listener: ConnectionListener) {
     this.listeners.add(listener);
   }
 
-  removeListener(listener: Listener) {
+  removeListener(listener: ConnectionListener) {
     this.listeners.delete(listener);
   }
 
@@ -50,14 +65,6 @@ export class SyncClient {
     this.stateHandlers.delete(handler);
   }
 
-  clearReconnect() {
-    if (this.reconnectHandler) {
-      clearTimeout(this.reconnectHandler);
-      this.reconnectHandler = null;
-    }
-  }
-
-  // Convert a user-entered address (e.g. "example.com:8777") into a ws:// URL.
   static resolveUrl(address: string): string {
     const trimmed = address.trim();
     if (trimmed.startsWith("ws://") || trimmed.startsWith("wss://")) return trimmed;
@@ -67,255 +74,227 @@ export class SyncClient {
   }
 
   static loginUrl(address: string, username: string): string {
-    const base = SyncClient.resolveUrl(address);
-    return `${base}/${encodeURIComponent(username)}`;
+    return `${SyncClient.resolveUrl(address)}/${encodeURIComponent(username)}`;
   }
 
-  // Connect and authenticate. Resolves once the server has confirmed
-  // authentication (or auto-registered the user). Rejects on failure.
   connect(url: string, username: string, password: string): Promise<void> {
-    // If we're already authenticated with the same url+user, resolve immediately.
     if (
       this.url === url &&
       this.username === username &&
-      this.ws &&
-      this.ws.readyState === WebSocket.OPEN &&
+      this.isConnected() &&
       this.authenticated
     ) {
       return Promise.resolve();
     }
 
-    // Disconnect any existing socket before reconnecting.
-    this.disconnect();
+    if (this.connectPromise && this.url === url && this.username === username) {
+      return this.connectPromise;
+    }
 
+    this.disconnect();
     this.url = url;
     this.username = username;
     this.password = password;
 
-    return new Promise((resolve, reject) => {
+    const promise = new Promise<void>((resolve, reject) => {
       this.connectResolve = resolve;
       this.connectReject = reject;
-      this.doConnect();
 
-      // Timeout if auth never completes.
-      this.reconnectHandler = setTimeout(() => {
-        if (!this.authenticated && this.connectReject === reject) {
-          this.connectReject = null;
-          this.connectResolve = null;
-          reject(new Error("连接超时：认证未完成"));
-        }
-      }, 15000);
-    });
-  }
-
-  private doConnect() {
-    this.closeWebSocket();
-
-    try {
-      this.ws = new WebSocket(this.url!);
-    } catch (e) {
-      const err = e instanceof Error ? e : new Error(String(e));
-      this.notifyAll(false, String(e));
-      this.connectReject?.(err);
-      this.connectReject = null;
-      this.connectResolve = null;
-      return;
-    }
-
-    this.ws.onopen = () => {
-      this.notifyAll(true);
-      // Defer authenticate until we receive a Welcome message.
-    };
-
-    this.ws.onclose = () => {
-      const wasAuth = this.authenticated;
-      this.authenticated = false;
-      this.notifyAll(false);
-      // Only reject if the connect promise hasn't been settled yet.
-      if (!wasAuth && this.connectReject) {
-        this.connectReject(new Error("连接已断开"));
-        this.connectReject = null;
-        this.connectResolve = null;
-      }
-    };
-
-    this.ws.onerror = () => {
-      // onerror usually precedes onclose; let onclose handle the reject
-      // to avoid double-rejecting the connect promise.
-      if (this.authenticated) {
-        this.notifyAll(false, "WebSocket error");
-      }
-    };
-
-    this.ws.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data) as ServerMessage;
-        this.handleMessage(data);
-      } catch {
-        // ignore malformed messages
+        this.ws = new WebSocket(url);
+      } catch (error) {
+        this.failConnection(error instanceof Error ? error : new Error(String(error)));
+        return;
       }
-    };
-  }
 
-  private handleMessage(msg: ServerMessage) {
-    switch (msg.type) {
-      case "welcome": {
-        // Server ready — send credentials to authenticate.
-        this.sendMessage({
-          type: "authenticate",
-          username: this.username!,
-          password: this.password!,
-        });
-        break;
-      }
-      case "authenticated": {
-        this.authenticated = true;
-        if (this.pendingPush) {
-          this.sendMessage({ type: "push", state: this.pendingPush });
-          this.pendingPush = null;
+      this.ws.onopen = () => {
+        this.notify(null);
+      };
+
+      this.ws.onmessage = (event) => {
+        try {
+          this.handleMessage(JSON.parse(event.data) as ServerMessage);
+        } catch {
+          // Ignore malformed server messages; the connection can continue.
         }
-        // Resolve the connect() promise.
-        if (this.connectResolve) {
-          this.clearReconnect();
-          this.connectResolve();
-          this.connectResolve = null;
-          this.connectReject = null;
+      };
+
+      this.ws.onerror = () => {
+        if (this.authenticated) {
+          this.notify("WebSocket 连接异常");
         }
-        break;
-      }
-      case "authentication_failed": {
+      };
+
+      this.ws.onclose = () => {
+        const wasAuthenticated = this.authenticated;
+        const error = new Error(wasAuthenticated ? "同步连接已断开" : "同步连接已关闭");
         this.authenticated = false;
-        const err = new Error("认证失败：用户名或密码错误");
-        this.connectReject?.(err);
+        this.connectReject?.(error);
         this.connectReject = null;
         this.connectResolve = null;
-        this.pendingReject?.(err);
-        this.pendingReject = null;
-        this.pendingResolve = null;
-        this.notifyAll(false, "认证失败：用户名或密码错误");
-        break;
+        this.notify(error.message);
+        this.failPending(error);
+        this.clearConnectTimer();
+        this.connectPromise = null;
+      };
+
+      this.connectTimer = setTimeout(() => {
+        this.failConnection(new Error("连接超时：认证未完成"));
+      }, 15_000);
+    });
+
+    this.connectPromise = promise;
+    return promise.finally(() => {
+      if (this.connectPromise === promise) {
+        this.connectPromise = null;
       }
-      case "push_ack": {
-        // Server accepted our push. Request latest state to be safe.
-        this.sendMessage({ type: "request_state" });
-        break;
-      }
-      case "state": {
-        if (this.pendingResolve) {
-          this.pendingResolve(msg.state);
-          this.pendingResolve = null;
-          this.pendingReject = null;
-        }
-        this.stateHandlers.forEach((h) => h(msg.state));
-        // After state is applied, download any images we're missing.
-        if (msg.attachments && msg.attachments.length > 0) {
-          void useSyncStore.getState().downloadNewImages(msg.attachments);
-        }
-        break;
-      }
-      case "error": {
-        const err = new Error(msg.message);
-        this.connectReject?.(err);
-        this.connectReject = null;
-        this.connectResolve = null;
-        this.pendingReject?.(err);
-        this.pendingReject = null;
-        this.pendingResolve = null;
-        this.notifyAll(this.authenticated, msg.message);
-        break;
-      }
-    }
+    });
   }
 
-  private sendMessage(msg: ClientMessage) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
-    } else {
-      this.pendingPush = msg.type === "push" ? msg.state : null;
-    }
-  }
+  push(state: RemoteNotebookState, baseVersion: number, timeoutMs = 10_000): Promise<PushResult> {
+    if (!this.isConnected()) return Promise.reject(new Error("WebSocket 未连接"));
+    if (!this.authenticated) return Promise.reject(new Error("尚未完成认证"));
 
-  // Push local notebook state to the server. Resolves with the server's
-  // latest state after acknowledging the push.
-  push(state: RemoteNotebookState, timeoutMs = 15000): Promise<RemoteNotebookState> {
     return new Promise((resolve, reject) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-        reject(new Error("WebSocket 未连接"));
-        return;
-      }
-      if (!this.authenticated) {
-        reject(new Error("尚未完成认证"));
-        return;
-      }
-      this.pendingResolve = resolve;
-      this.pendingReject = reject;
-      this.sendMessage({ type: "push", state });
-      setTimeout(() => {
-        if (this.pendingResolve === resolve) {
-          this.pendingResolve = null;
-          this.pendingReject = null;
+      const pending: PendingPush = {
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          this.pendingPushes = this.pendingPushes.filter((item) => item !== pending);
           reject(new Error("同步超时"));
-        }
-      }, timeoutMs);
+        }, timeoutMs),
+      };
+      this.pendingPushes.push(pending);
+      this.sendMessage({ type: "push", state, base_version: baseVersion });
     });
-  }
-
-  // Request the current remote state; resolves when it arrives.
-  // Must be called only after connect() resolves.
-  requestState(timeoutMs = 10000): Promise<RemoteNotebookState> {
-    return new Promise((resolve, reject) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-        reject(new Error("WebSocket 未连接"));
-        return;
-      }
-      if (!this.authenticated) {
-        reject(new Error("尚未完成认证"));
-        return;
-      }
-      this.pendingResolve = resolve;
-      this.pendingReject = reject;
-      this.sendMessage({ type: "request_state" });
-      setTimeout(() => {
-        if (this.pendingResolve === resolve) {
-          this.pendingResolve = null;
-          this.pendingReject = null;
-          reject(new Error("获取状态超时"));
-        }
-      }, timeoutMs);
-    });
-  }
-
-  // Convenience: connect, authenticate, then request state in one call.
-  connectAndFetchState(url: string, username: string, password: string, timeoutMs = 10000): Promise<RemoteNotebookState> {
-    return this.connect(url, username, password).then(() =>
-      this.requestState(timeoutMs)
-    );
   }
 
   disconnect() {
-    this.clearReconnect();
+    this.clearConnectTimer();
     this.closeWebSocket();
     this.authenticated = false;
-    this.pendingPush = null;
-    this.pendingResolve = null;
-    this.pendingReject = null;
-    this.connectResolve = null;
-    this.connectReject = null;
+    this.connectPromise = null;
+    this.failPending(new Error("同步连接已关闭"));
+    this.notify(null);
   }
 
-  private closeWebSocket() {
-    if (this.ws) {
-      this.ws.onclose = null;
-      this.ws.onerror = null;
-      this.ws.onmessage = null;
-      this.ws.onopen = null;
-      try { this.ws.close(); } catch {}
-      this.ws = null;
+  private handleMessage(message: ServerMessage) {
+    switch (message.type) {
+      case "welcome":
+        this.sendMessage({
+          type: "authenticate",
+          username: this.username ?? "",
+          password: this.password ?? "",
+        });
+        break;
+
+      case "authenticated":
+        this.authenticated = true;
+        this.clearConnectTimer();
+        this.connectResolve?.();
+        this.connectResolve = null;
+        this.connectReject = null;
+        this.notify(null);
+        break;
+
+      case "authentication_failed":
+        this.failConnection(new Error("认证失败：用户名或密码错误"));
+        break;
+
+      case "push_ack": {
+        const pending = this.pendingPushes.shift();
+        if (pending) {
+          clearTimeout(pending.timer);
+          pending.resolve({ accepted: true, version: message.version });
+        }
+        break;
+      }
+
+      case "push_rejected": {
+        const remote: RemoteStateMessage = {
+          state: message.state,
+          attachments: message.attachments,
+        };
+        const pending = this.pendingPushes.shift();
+        if (pending) {
+          clearTimeout(pending.timer);
+          pending.resolve({ accepted: false, remote });
+        } else {
+          this.stateHandlers.forEach((handler) => handler(remote));
+        }
+        break;
+      }
+
+      case "state": {
+        const remote: RemoteStateMessage = {
+          state: message.state,
+          attachments: message.attachments,
+        };
+
+        this.stateHandlers.forEach((handler) => handler(remote));
+        break;
+      }
+
+      case "error":
+        this.notify(message.message);
+        this.failPending(new Error(message.message));
+        break;
     }
   }
 
-  private notifyAll(connected: boolean, error?: string) {
-    this.listeners.forEach((l) => l(connected, error));
+  private sendMessage(message: ClientMessage) {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
+    }
+  }
+
+  private failConnection(error: Error) {
+    this.clearConnectTimer();
+    this.connectReject?.(error);
+    this.connectReject = null;
+    this.connectResolve = null;
+    this.connectPromise = null;
+    this.authenticated = false;
+    this.closeWebSocket();
+    this.failPending(error);
+    this.notify(error.message);
+  }
+
+  private failPending(error: Error) {
+    for (const pending of this.pendingPushes.splice(0)) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+  }
+
+  private clearConnectTimer() {
+    if (this.connectTimer) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
+  }
+
+  private closeWebSocket() {
+    if (!this.ws) return;
+    this.ws.onclose = null;
+    this.ws.onerror = null;
+    this.ws.onmessage = null;
+    this.ws.onopen = null;
+    try {
+      this.ws.close();
+    } catch {
+      // Closing is best-effort.
+    }
+    this.ws = null;
+  }
+
+  private notify(error: string | null) {
+    const snapshot = {
+      connected: this.isConnected(),
+      authenticated: this.authenticated,
+      error,
+    };
+    this.listeners.forEach((listener) => listener(snapshot));
   }
 }
 

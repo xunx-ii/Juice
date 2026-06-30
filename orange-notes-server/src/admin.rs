@@ -17,7 +17,6 @@ pub struct SystemInfo {
     pub folder_count: i64,
     pub note_count: i64,
     pub user_count: i64,
-    pub deleted_count: i64,
     pub active_ws_clients: usize,
 }
 
@@ -43,7 +42,7 @@ pub async fn system_info(
     State(clients): State<Arc<ClientMap>>,
 ) -> Result<impl IntoResponse, Response> {
     admin_auth::check_admin_auth(&headers)?;
-    let (folder_count, note_count, user_count, deleted_count) = match gather_counts(&db).await {
+    let (folder_count, note_count, user_count) = match gather_counts(&db).await {
         Some(c) => c,
         None => return Ok(Json(serde_json::json!({ "error": "database error" })).into_response()),
     };
@@ -54,17 +53,15 @@ pub async fn system_info(
         folder_count,
         note_count,
         user_count,
-        deleted_count,
         active_ws_clients: clients.count(),
     }).into_response())
 }
 
-async fn gather_counts(db: &Database) -> Option<(i64, i64, i64, i64)> {
+async fn gather_counts(db: &Database) -> Option<(i64, i64, i64)> {
     let folder_count: i64 = db.conn_count("SELECT COUNT(*) FROM folders").await.ok()?;
     let note_count: i64 = db.conn_count("SELECT COUNT(*) FROM notes").await.ok()?;
     let user_count: i64 = db.conn_count("SELECT COUNT(*) FROM users").await.ok()?;
-    let deleted_count: i64 = db.conn_count("SELECT COUNT(*) FROM deleted_log").await.ok()?;
-    Some((folder_count, note_count, user_count, deleted_count))
+    Some((folder_count, note_count, user_count))
 }
 
 pub async fn list_users(

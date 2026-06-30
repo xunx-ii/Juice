@@ -1,13 +1,71 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
-import type { RemoteNotebookState, RemoteAttachmentMeta } from "./protocol";
-import { syncClient, SyncClient } from "./client";
+import type { RemoteAttachmentMeta } from "./protocol";
+import { syncClient, SyncClient, type RemoteStateMessage } from "./client";
 import { useNoteStore } from "../store/useNoteStore";
 
-// Regex must match the one in NoteEditor.tsx.
 const IMAGE_TOKEN_RE = /!\[\[([^\]\r\n]+)\]\]/g;
+const STORAGE_KEY = "orange-notes-sync-settings";
+const PUSH_DELAY_MS = 300;
+const RECONNECT_MIN_DELAY_MS = 1_500;
+const RECONNECT_MAX_DELAY_MS = 15_000;
+const MAX_PUSH_ATTEMPTS = 3;
 
-/// Extract all image filenames referenced in a piece of markdown content.
+let pushTimer: ReturnType<typeof setTimeout> | null = null;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let reconnectDelay = RECONNECT_MIN_DELAY_MS;
+let pushAgainAfterCurrent = false;
+let deferredRemoteState: RemoteStateMessage | null = null;
+
+export interface SyncSettings {
+  address: string;
+  username: string;
+  password: string;
+}
+
+export interface SyncStore {
+  settings: SyncSettings;
+  connected: boolean;
+  authenticated: boolean;
+  lastSync: number | null;
+  lastError: string | null;
+  syncing: boolean;
+
+  setSettings: (settings: Partial<SyncSettings>) => void;
+  resetSettings: () => void;
+  connectRealtime: () => Promise<void>;
+  pushNow: () => Promise<void>;
+  schedulePush: () => void;
+  syncImages: () => Promise<void>;
+  downloadImage: (fileName: string, mime: string) => Promise<void>;
+  downloadNewImages: (attachments: RemoteAttachmentMeta[]) => Promise<void>;
+}
+
+export function loadSyncSettings(): SyncSettings {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<SyncSettings>;
+      return {
+        address: parsed.address ?? "",
+        username: parsed.username ?? "",
+        password: parsed.password ?? "",
+      };
+    }
+  } catch {
+    // Ignore malformed local settings.
+  }
+  return { address: "", username: "", password: "" };
+}
+
+export function saveSyncSettings(settings: SyncSettings) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+}
+
+function hasCompleteSettings(settings: SyncSettings) {
+  return Boolean(settings.address && settings.username && settings.password);
+}
+
 function extractImageTokens(content: string): string[] {
   const result: string[] = [];
   let match: RegExpExecArray | null;
@@ -19,7 +77,6 @@ function extractImageTokens(content: string): string[] {
   return result;
 }
 
-/// Derive the HTTP base URL from a ws:// sync address.
 function httpBaseFromSyncAddress(address: string): string {
   let httpBase = address.trim();
   if (httpBase.startsWith("ws://")) httpBase = "http://" + httpBase.slice(5);
@@ -35,71 +92,70 @@ function syncAuthHeaders(settings: SyncSettings): HeadersInit {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Sync scheduler – coalesces rapid mutations (typing, drag, …) into a single
-// network round-trip so we don't hammer the server on every keystroke.
-// ---------------------------------------------------------------------------
-let scheduleTimer: ReturnType<typeof setTimeout> | null = null;
-
-function scheduleSync() {
-  if (scheduleTimer) clearTimeout(scheduleTimer);
-  scheduleTimer = setTimeout(runSync, 1200);
-}
-
-function runSync() {
-  scheduleTimer = null;
-  const store = useSyncStore.getState();
-  if (store.settings.address && store.settings.username && store.settings.password) {
-    void store.startSync();
+function clearPushTimer() {
+  if (pushTimer) {
+    clearTimeout(pushTimer);
+    pushTimer = null;
   }
 }
 
-export interface SyncSettings {
-  address: string;   // e.g. "example.com:8777"
-  username: string;
-  password: string;
+function clearReconnectTimer() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
 }
 
-const STORAGE_KEY = "orange-notes-sync-settings";
+function scheduleReconnect() {
+  const { settings, authenticated, connected } = useSyncStore.getState();
+  if (!hasCompleteSettings(settings) || authenticated || connected || reconnectTimer) return;
 
-export function loadSyncSettings(): SyncSettings {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<SyncSettings>;
-      return {
-        address: parsed.address ?? "",
-        username: parsed.username ?? "",
-        password: parsed.password ?? "",
-      };
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    void useSyncStore.getState().connectRealtime().catch(() => {
+      scheduleReconnect();
+    });
+    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_DELAY_MS);
+  }, reconnectDelay);
+}
+
+async function applyRemoteState(message: RemoteStateMessage) {
+  await useNoteStore.getState().applyRemoteChanges(message.state);
+  await useSyncStore.getState().downloadNewImages(message.attachments);
+  useSyncStore.setState({
+    lastSync: Date.now(),
+    lastError: null,
+    authenticated: syncClient.isAuthenticated(),
+    connected: syncClient.isConnected(),
+  });
+}
+
+async function mergeRejectedState(message: RemoteStateMessage) {
+  await useNoteStore.getState().mergeRemoteSnapshot(message.state);
+  await useSyncStore.getState().downloadNewImages(message.attachments);
+}
+
+async function applyIncomingState(message: RemoteStateMessage) {
+  const noteStore = useNoteStore.getState();
+  const localVersion = noteStore.syncVersion;
+
+  const store = useSyncStore.getState();
+  if (message.state.version === 0 && localVersion === 0 && noteStore.hasContent()) {
+    store.schedulePush();
+    return;
+  }
+
+  if (message.state.version <= localVersion) return;
+
+  if (store.syncing || pushTimer || noteStore.hasLocalChanges()) {
+    deferredRemoteState = message;
+    if (noteStore.hasLocalChanges() && !pushTimer) {
+      store.schedulePush();
     }
-  } catch {}
-  return { address: "", username: "", password: "" };
-}
+    return;
+  }
 
-export function saveSyncSettings(s: SyncSettings) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
-}
-
-export interface SyncStore {
-  settings: SyncSettings;
-  connected: boolean;
-  authenticated: boolean;
-  lastSync: number | null;
-  lastError: string | null;
-  testing: boolean;
-  syncing: boolean;
-
-  setSettings: (s: Partial<SyncSettings>) => void;
-  resetSettings: () => void;
-  testConnection: () => Promise<RemoteNotebookState>;
-  pushState: (state: RemoteNotebookState) => Promise<RemoteNotebookState>;
-  startSync: () => Promise<void>;
-  scheduleSync: () => void;
-  syncImages: () => Promise<void>;
-  downloadImage: (fileName: string, mime: string) => Promise<void>;
-  downloadNewImages: (attachments: RemoteAttachmentMeta[]) => Promise<void>;
-  setState: (s: Partial<Pick<SyncStore, "connected" | "authenticated" | "lastSync" | "lastError" | "testing" | "syncing">>) => void;
+  await applyRemoteState(message);
 }
 
 export const useSyncStore = create<SyncStore>((set, get) => ({
@@ -108,86 +164,132 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   authenticated: false,
   lastSync: null,
   lastError: null,
-  testing: false,
   syncing: false,
 
   setSettings: (partial) => {
-    const next = { ...get().settings, ...partial };
-    saveSyncSettings(next);
-    set({ settings: next });
+    const settings = { ...get().settings, ...partial };
+    saveSyncSettings(settings);
+    set({ settings, lastError: null });
+
+    if (hasCompleteSettings(settings)) {
+      void get().connectRealtime().catch(() => {
+        scheduleReconnect();
+      });
+    }
   },
 
   resetSettings: () => {
+    clearPushTimer();
+    clearReconnectTimer();
     saveSyncSettings({ address: "", username: "", password: "" });
-    set({ settings: { address: "", username: "", password: "" }, connected: false, authenticated: false });
+    set({
+      settings: { address: "", username: "", password: "" },
+      connected: false,
+      authenticated: false,
+      lastError: null,
+      syncing: false,
+    });
     syncClient.disconnect();
   },
 
-  testConnection: async () => {
+  connectRealtime: async () => {
     const { settings } = get();
-    if (!settings.address || !settings.username || !settings.password) {
-      const err = new Error("请填写服务器地址、用户名和密码");
-      set({ lastError: String(err) });
-      throw err;
+    if (!hasCompleteSettings(settings)) {
+      set({ lastError: "请先配置服务器地址、用户名和密码" });
+      return;
     }
-
-    set({ testing: true, lastError: null });
 
     try {
       const url = SyncClient.loginUrl(settings.address, settings.username);
-      const state = await syncClient.connectAndFetchState(
-        url,
-        settings.username,
-        settings.password
-      );
-      set({ testing: false, authenticated: true });
-      return state;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      set({ testing: false, lastError: msg, authenticated: false });
-      // Disconnect so the next test starts fresh.
-      syncClient.disconnect();
-      throw new Error(msg);
+      await syncClient.connect(url, settings.username, settings.password);
+      reconnectDelay = RECONNECT_MIN_DELAY_MS;
+      clearReconnectTimer();
+      set({
+        connected: syncClient.isConnected(),
+        authenticated: syncClient.isAuthenticated(),
+        lastError: null,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      set({
+        connected: syncClient.isConnected(),
+        authenticated: syncClient.isAuthenticated(),
+        lastError: message,
+      });
+      scheduleReconnect();
+      throw new Error(message);
     }
   },
 
-  pushState: async (state) => {
-    const { settings } = get();
+  pushNow: async () => {
+    if (!hasCompleteSettings(get().settings)) {
+      set({ lastError: "请先配置服务器地址、用户名和密码" });
+      return;
+    }
+
+    if (get().syncing) {
+      pushAgainAfterCurrent = true;
+      return;
+    }
+
+    clearPushTimer();
+    set({ syncing: true, lastError: null });
+
     try {
-      // If not connected, establish connection first.
-      if (!syncClient.isAuthenticated()) {
-        const url = SyncClient.loginUrl(settings.address, settings.username);
-        await syncClient.connect(url, settings.username, settings.password);
+      await get().connectRealtime();
+      await get().syncImages();
+      for (let attempt = 0; attempt < MAX_PUSH_ATTEMPTS; attempt += 1) {
+        const noteStore = useNoteStore.getState();
+        const payload = noteStore.getSyncPayload();
+        const result = await syncClient.push(payload, noteStore.syncVersion);
+        if (result.accepted) {
+          await useNoteStore.getState().markSynced(result.version);
+          break;
+        }
+
+        await mergeRejectedState(result.remote);
+        if (attempt === MAX_PUSH_ATTEMPTS - 1) {
+          throw new Error("远端版本持续变化，同步稍后重试");
+        }
       }
-      const result = await syncClient.push(state);
-      set({ lastSync: Date.now(), lastError: null, authenticated: true });
-      return result;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      set({ lastError: msg, authenticated: syncClient.isAuthenticated() });
-      throw e;
+      set({
+        lastSync: Date.now(),
+        connected: syncClient.isConnected(),
+        authenticated: syncClient.isAuthenticated(),
+        lastError: null,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      set({ lastError: message });
+      scheduleReconnect();
+    } finally {
+      set({ syncing: false });
+      if (pushAgainAfterCurrent) {
+        pushAgainAfterCurrent = false;
+        get().schedulePush();
+      } else if (deferredRemoteState) {
+        const remote = deferredRemoteState;
+        deferredRemoteState = null;
+        void applyIncomingState(remote);
+      }
     }
   },
 
-  scheduleSync: () => {
-    scheduleSync();
+  schedulePush: () => {
+    clearPushTimer();
+    pushTimer = setTimeout(() => {
+      pushTimer = null;
+      void useSyncStore.getState().pushNow();
+    }, PUSH_DELAY_MS);
   },
 
-  // -----------------------------------------------------------------------
-  // Image sync
-  // -----------------------------------------------------------------------
-
-  /// Upload all images referenced in the current local notes to the server.
   syncImages: async () => {
     const { settings } = get();
-    if (!settings.address || !settings.username || !settings.password) return;
+    if (!hasCompleteSettings(settings)) return;
 
-    const notes = useNoteStore.getState().notes;
     const httpBase = httpBaseFromSyncAddress(settings.address);
-
-    // Collect all referenced image filenames.
     const allNames = new Set<string>();
-    for (const note of notes) {
+    for (const note of useNoteStore.getState().notes) {
       for (const name of extractImageTokens(note.content)) {
         allNames.add(name);
       }
@@ -195,104 +297,70 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
 
     for (const fileName of allNames) {
       try {
-        // Read raw bytes from local disk.
         const bytes = await invoke<number[]>("read_note_image_bytes", { fileName });
-        if (!bytes || bytes.length === 0) continue;
-
-        // Build a Uint8Array for the fetch body.
-        const body = new Uint8Array(bytes);
+        if (!bytes.length) continue;
 
         await fetch(
           `${httpBase}/api/sync/files/${encodeURIComponent(settings.username)}/${encodeURIComponent(fileName)}`,
-          { method: "POST", headers: syncAuthHeaders(settings), body }
+          {
+            method: "POST",
+            headers: syncAuthHeaders(settings),
+            body: new Uint8Array(bytes),
+          }
         );
       } catch {
-        // Image might not exist locally yet — skip.
+        // Missing local images should not block note state sync.
       }
     }
   },
 
-  /// Download a single image from the server and save it locally.
-  downloadImage: async (fileName: string, mime: string) => {
+  downloadImage: async (fileName, mime) => {
     const { settings } = get();
-    if (!settings.address || !settings.username || !settings.password) return;
+    if (!hasCompleteSettings(settings)) return;
 
     const httpBase = httpBaseFromSyncAddress(settings.address);
     const url = `${httpBase}/api/sync/files/${encodeURIComponent(settings.username)}/${encodeURIComponent(fileName)}`;
 
     try {
-      const r = await fetch(url, { headers: syncAuthHeaders(settings) });
-      if (!r.ok) return;
-      const blob = await r.blob();
-      const arrayBuf = await blob.arrayBuffer();
-      const bytes = Array.from(new Uint8Array(arrayBuf));
+      const response = await fetch(url, { headers: syncAuthHeaders(settings) });
+      if (!response.ok) return;
 
+      const bytes = Array.from(new Uint8Array(await response.arrayBuffer()));
       await invoke("save_synced_image", { fileName, mime, bytes });
     } catch {
-      // Network error — skip.
+      // Remote images are retried on the next state broadcast.
     }
   },
 
-  /// Download any images that the server has but we don't have locally.
-  downloadNewImages: async (attachments: RemoteAttachmentMeta[]) => {
+  downloadNewImages: async (attachments) => {
     const { settings } = get();
-    if (!settings.address || !settings.username || !settings.password || attachments.length === 0) return;
+    if (!hasCompleteSettings(settings) || attachments.length === 0) return;
 
-    for (const att of attachments) {
+    for (const attachment of attachments) {
       try {
-        // Check if the file already exists locally.
-        const exists = await invoke<boolean>("image_file_exists", { fileName: att.file_name });
+        const exists = await invoke<boolean>("image_file_exists", {
+          fileName: attachment.file_name,
+        });
         if (!exists) {
-          await get().downloadImage(att.file_name, att.mime);
+          await get().downloadImage(attachment.file_name, attachment.mime);
         }
       } catch {
-        // Try to download anyway on error.
-        await get().downloadImage(att.file_name, att.mime);
+        await get().downloadImage(attachment.file_name, attachment.mime);
       }
     }
   },
-
-  startSync: async () => {
-    const { settings } = get();
-    if (!settings.address || !settings.username || !settings.password) {
-      set({ lastError: "请先配置服务器地址、用户名和密码" });
-      return;
-    }
-    if (get().syncing) return; // already syncing
-
-    set({ syncing: true, lastError: null });
-
-    try {
-      // Get current local state and push to server.
-      const payload = useNoteStore.getState().getSyncPayload();
-      const result = await get().pushState(payload);
-      // Apply any remote changes back to the UI.
-      await useNoteStore.getState().applyRemoteChanges(result);
-      set({ lastSync: Date.now(), lastError: null, authenticated: true });
-      // Upload local images and download missing remote images.
-      await get().syncImages();
-      // Request state response will include attachments metadata;
-      // we handle that in the WS message handler.
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      set({ lastError: msg });
-    } finally {
-      set({ syncing: false });
-    }
-  },
-
-  setState: (partial) => set(partial as SyncStore),
 }));
 
-// Keep the store in sync with the client's connection state.
-syncClient.addListener((connected, error) => {
-  useSyncStore.getState().setState({
+syncClient.addListener(({ connected, authenticated, error }) => {
+  useSyncStore.setState((state) => ({
     connected,
-    authenticated: syncClient.isAuthenticated(),
-    lastError: error ?? null,
-  });
+    authenticated,
+    lastError: error ?? (authenticated ? null : state.lastError),
+  }));
+
+  if (!connected && !authenticated) scheduleReconnect();
 });
 
-syncClient.addStateHandler(() => {
-  useSyncStore.getState().setState({ lastSync: Date.now() });
+syncClient.addStateHandler((message) => {
+  void applyIncomingState(message);
 });

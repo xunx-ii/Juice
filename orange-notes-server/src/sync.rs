@@ -1,23 +1,31 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path,
-        State,
+        Path, State,
     },
     response::IntoResponse,
 };
+use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::auth;
 use crate::db::{Database, NotebookState};
+
+type OutboundSender = mpsc::UnboundedSender<ServerMessage>;
 
 #[derive(Clone, Serialize)]
 pub struct ClientInfo {
     pub username: String,
     pub connected_at: String,
+}
+
+#[derive(Clone)]
+struct ClientSession {
+    info: ClientInfo,
+    tx: OutboundSender,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -28,7 +36,7 @@ pub struct AttachmentMeta {
 
 #[derive(Clone, Default)]
 pub struct ClientMap {
-    clients: Arc<Mutex<HashMap<String, ClientInfo>>>,
+    clients: Arc<Mutex<HashMap<String, ClientSession>>>,
 }
 
 impl ClientMap {
@@ -36,16 +44,34 @@ impl ClientMap {
         Self::default()
     }
 
-    pub async fn add(&self, session_id: String, info: ClientInfo) {
-        self.clients.lock().await.insert(session_id, info);
+    async fn add(&self, session_id: String, session: ClientSession) {
+        self.clients.lock().await.insert(session_id, session);
     }
 
     pub async fn remove(&self, session_id: &str) {
         self.clients.lock().await.remove(session_id);
     }
 
+    pub async fn broadcast_user(&self, username: &str, message: ServerMessage) {
+        let mut clients = self.clients.lock().await;
+        let mut stale_sessions = Vec::new();
+
+        for (session_id, session) in clients.iter() {
+            if session.info.username != username {
+                continue;
+            }
+
+            if session.tx.send(message.clone()).is_err() {
+                stale_sessions.push(session_id.clone());
+            }
+        }
+
+        for session_id in stale_sessions {
+            clients.remove(&session_id);
+        }
+    }
+
     pub fn count(&self) -> usize {
-        // Best-effort count; if the lock is contended, skip.
         if let Ok(guard) = self.clients.try_lock() {
             guard.len()
         } else {
@@ -55,7 +81,7 @@ impl ClientMap {
 
     pub fn list(&self) -> Vec<ClientInfo> {
         if let Ok(guard) = self.clients.try_lock() {
-            guard.values().cloned().collect()
+            guard.values().map(|session| session.info.clone()).collect()
         } else {
             Vec::new()
         }
@@ -66,20 +92,17 @@ impl ClientMap {
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 enum ClientMessage {
-    Authenticate {
-        username: String,
-        password: String,
-    },
+    Authenticate { username: String, password: String },
     Push {
         state: NotebookState,
+        base_version: i64,
     },
-    RequestState,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
-enum ServerMessage {
+pub enum ServerMessage {
     Welcome {
         session_id: String,
     },
@@ -87,6 +110,10 @@ enum ServerMessage {
     AuthenticationFailed,
     PushAck {
         version: i64,
+    },
+    PushRejected {
+        state: NotebookState,
+        attachments: Vec<AttachmentMeta>,
     },
     Error {
         message: String,
@@ -106,157 +133,219 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, username, database, clients))
 }
 
-async fn handle_socket(mut socket: WebSocket, username: String, db: Arc<Database>, clients: Arc<ClientMap>) {
+async fn handle_socket(
+    socket: WebSocket,
+    path_username: String,
+    db: Arc<Database>,
+    clients: Arc<ClientMap>,
+) {
     let session_id = uuid::Uuid::new_v4().to_string();
-    let connected_at = chrono::Utc::now().to_rfc3339();
-    clients.add(session_id.clone(), ClientInfo {
-        username: username.clone(),
-        connected_at,
-    }).await;
+    let (mut socket_tx, mut socket_rx) = socket.split();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ServerMessage>();
 
-    let _ = send(&mut socket, &ServerMessage::Welcome {
-        session_id: session_id.clone(),
-    }).await;
+    let writer = tokio::spawn(async move {
+        while let Some(message) = out_rx.recv().await {
+            let Ok(json) = serde_json::to_string(&message) else {
+                break;
+            };
 
-    let mut auth_success = false;
+            if socket_tx.send(Message::Text(json)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    send_channel(
+        &out_tx,
+        ServerMessage::Welcome {
+            session_id: session_id.clone(),
+        },
+    );
+
     let mut authenticated_user: Option<String> = None;
 
-    while let Some(Ok(message)) = socket.recv().await {
+    while let Some(message) = socket_rx.next().await {
+        let Ok(message) = message else {
+            break;
+        };
+
         match message {
-            Message::Text(text) => {
-                match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(client_message) => {
-                        match client_message {
-                            ClientMessage::Authenticate { username: auth_username, password } => {
-                                if auth_username != username {
-                                    let _ = send(&mut socket, &ServerMessage::AuthenticationFailed).await;
-                                    continue;
-                                }
+            Message::Text(text) => match serde_json::from_str::<ClientMessage>(&text) {
+                Ok(ClientMessage::Authenticate { username, password }) => {
+                    if authenticated_user.is_some() {
+                        continue;
+                    }
 
-                                // Only authenticate existing users — no auto-registration.
-                                match db.get_user_password_hash(auth_username.clone()).await {
-                                    Ok(Some(hash)) => {
-                                        if auth::verify_password(&password, hash.as_str()) {
-                                            auth_success = true;
-                                            authenticated_user = Some(auth_username.clone());
-                                            clients.add(session_id.clone(), ClientInfo {
-                                                username: auth_username.clone(),
-                                                connected_at: chrono::Utc::now().to_rfc3339(),
-                                            }).await;
-                                            let _ = send(&mut socket, &ServerMessage::Authenticated).await;
-                                        } else {
-                                            let _ = send(&mut socket, &ServerMessage::AuthenticationFailed).await;
-                                        }
-                                    }
-                                    Ok(None) => {
-                                        // User does not exist — reject with a clear message.
-                                        let _ = send(&mut socket, &ServerMessage::Error {
-                                            message: format!("用户 '{}' 不存在，请先在管理后台注册", auth_username),
-                                        }).await;
-                                    }
-                                    Err(e) => {
-                                        let _ = send(&mut socket, &ServerMessage::Error {
-                                            message: format!("Database error: {}", e),
-                                        }).await;
-                                    }
-                                }
-                            }
-                            ClientMessage::Push { state } => {
-                                if !auth_success {
-                                    let _ = send(&mut socket, &ServerMessage::Error {
-                                        message: "Not authenticated".to_string(),
-                                    }).await;
-                                    continue;
-                                }
+                    if username != path_username {
+                        send_channel(&out_tx, ServerMessage::AuthenticationFailed);
+                        continue;
+                    }
 
-                                let user = authenticated_user.clone().unwrap_or_default();
-                                if let Err(e) = apply_state(&db, &user, &state).await {
-                                    let _ = send(&mut socket, &ServerMessage::Error {
-                                        message: format!("Push failed: {}", e),
-                                    }).await;
-                                    continue;
-                                }
+                    match authenticate(&db, &username, &password).await {
+                        Ok(true) => {
+                            authenticated_user = Some(username.clone());
+                            clients
+                                .add(
+                                    session_id.clone(),
+                                    ClientSession {
+                                        info: ClientInfo {
+                                            username: username.clone(),
+                                            connected_at: chrono::Utc::now().to_rfc3339(),
+                                        },
+                                        tx: out_tx.clone(),
+                                    },
+                                )
+                                .await;
 
-                                let new_version = chrono::Utc::now().timestamp_millis();
-                                let _ = send(&mut socket, &ServerMessage::PushAck {
-                                    version: new_version,
-                                }).await;
-                            }
-                            ClientMessage::RequestState => {
-                                if !auth_success {
-                                    let _ = send(&mut socket, &ServerMessage::Error {
-                                        message: "Not authenticated".to_string(),
-                                    }).await;
-                                    continue;
-                                }
-
-                                let user = authenticated_user.clone().unwrap_or_default();
-                                match db.get_state(&user).await {
-                                    Ok(state) => {
-                                        // Also fetch attachment metadata so the client
-                                        // can download images it's missing locally.
-                                        let attachments = db
-                                            .list_attachments(&user)
-                                            .await
-                                            .unwrap_or_default()
-                                            .into_iter()
-                                            .map(|(file_name, mime)| AttachmentMeta { file_name, mime })
-                                            .collect();
-                                        let _ = send(&mut socket, &ServerMessage::State {
-                                            state,
-                                            attachments,
-                                        }).await;
-                                    }
-                                    Err(e) => {
-                                        let _ = send(&mut socket, &ServerMessage::Error {
-                                            message: format!("Failed to load state: {}", e),
-                                        }).await;
-                                    }
-                                }
+                            send_channel(&out_tx, ServerMessage::Authenticated);
+                            if let Err(error) = send_current_state(&out_tx, &db, &username).await {
+                                send_channel(&out_tx, ServerMessage::Error { message: error });
                             }
                         }
-                    }
-                    Err(e) => {
-                        let _ = send(&mut socket, &ServerMessage::Error {
-                            message: format!("Invalid message: {}", e),
-                        }).await;
+                        Ok(false) => {
+                            send_channel(&out_tx, ServerMessage::AuthenticationFailed);
+                        }
+                        Err(error) => {
+                            send_channel(&out_tx, ServerMessage::Error { message: error });
+                        }
                     }
                 }
-            }
+                Ok(ClientMessage::Push {
+                    state,
+                    base_version,
+                }) => {
+                    let Some(user) = authenticated_user.as_deref() else {
+                        send_channel(
+                            &out_tx,
+                            ServerMessage::Error {
+                                message: "未完成同步认证".to_string(),
+                            },
+                        );
+                        continue;
+                    };
+
+                    let version = match apply_state(&db, user, &state, base_version).await {
+                        Ok(ApplyResult::Accepted { version }) => version,
+                        Ok(ApplyResult::Rejected { latest }) => {
+                            send_channel(&out_tx, latest);
+                            continue;
+                        }
+                        Err(error) => {
+                            send_channel(
+                                &out_tx,
+                                ServerMessage::Error {
+                                    message: format!("同步写入失败: {error}"),
+                                },
+                            );
+                            continue;
+                        }
+                    };
+
+                    send_channel(
+                        &out_tx,
+                        ServerMessage::PushAck { version },
+                    );
+
+                    if let Err(error) = broadcast_current_state(&clients, &db, user).await {
+                        send_channel(&out_tx, ServerMessage::Error { message: error });
+                    }
+                }
+                Err(error) => {
+                    send_channel(
+                        &out_tx,
+                        ServerMessage::Error {
+                            message: format!("同步消息格式错误: {error}"),
+                        },
+                    );
+                }
+            },
             Message::Close(_) => break,
             _ => {}
         }
     }
 
-    // Client disconnected — remove from active clients map.
     clients.remove(&session_id).await;
+    writer.abort();
 }
 
-async fn send(socket: &mut WebSocket, msg: &ServerMessage) -> Result<(), axum::Error> {
-    match serde_json::to_string(msg) {
-        Ok(json) => socket.send(Message::Text(json)).await,
-        Err(_) => Err(axum::Error::new("serialization failed")),
+async fn authenticate(db: &Database, username: &str, password: &str) -> Result<bool, String> {
+    match db.get_user_password_hash(username.to_string()).await {
+        Ok(Some(hash)) => Ok(auth::verify_password(password, hash.as_str())),
+        Ok(None) => Ok(false),
+        Err(error) => Err(format!("数据库错误: {error}")),
     }
 }
 
-async fn apply_state(db: &Database, user_id: &str, state: &NotebookState) -> Result<(), String> {
-    for folder in &state.folders {
-        db.upsert_folder(user_id.to_string(), folder.clone())
-            .await
-            .map_err(|e| format!("upsert folder {}: {}", folder.id, e))?;
-    }
+fn send_channel(tx: &OutboundSender, message: ServerMessage) {
+    let _ = tx.send(message);
+}
 
-    for note in &state.notes {
-        db.upsert_note(user_id.to_string(), note.clone())
-            .await
-            .map_err(|e| format!("upsert note {}: {}", note.id, e))?;
-    }
+async fn read_state_and_attachments(
+    db: &Database,
+    username: &str,
+) -> Result<(NotebookState, Vec<AttachmentMeta>), String> {
+    let state = db
+        .get_state(username)
+        .await
+        .map_err(|error| format!("读取同步状态失败: {error}"))?;
+    let attachments = db
+        .list_attachments(username)
+        .await
+        .map_err(|error| format!("读取附件列表失败: {error}"))?
+        .into_iter()
+        .map(|(file_name, mime)| AttachmentMeta { file_name, mime })
+        .collect();
 
-    for deleted in &state.deleted {
-        db.delete_entity(user_id.to_string(), deleted.entity_type.clone(), deleted.id.clone())
-            .await
-            .map_err(|e| format!("delete {} {}: {}", deleted.entity_type, deleted.id, e))?;
-    }
+    Ok((state, attachments))
+}
 
+async fn current_state_message(db: &Database, username: &str) -> Result<ServerMessage, String> {
+    let (state, attachments) = read_state_and_attachments(db, username).await?;
+    Ok(ServerMessage::State { state, attachments })
+}
+
+async fn send_current_state(
+    tx: &OutboundSender,
+    db: &Database,
+    username: &str,
+) -> Result<(), String> {
+    let message = current_state_message(db, username).await?;
+    tx.send(message)
+        .map_err(|_| "同步连接已断开".to_string())
+}
+
+async fn broadcast_current_state(
+    clients: &ClientMap,
+    db: &Database,
+    username: &str,
+) -> Result<(), String> {
+    let message = current_state_message(db, username).await?;
+    clients.broadcast_user(username, message).await;
     Ok(())
+}
+
+enum ApplyResult {
+    Accepted { version: i64 },
+    Rejected { latest: ServerMessage },
+}
+
+async fn apply_state(
+    db: &Database,
+    user_id: &str,
+    state: &NotebookState,
+    base_version: i64,
+) -> Result<ApplyResult, String> {
+    match db
+        .replace_state_if_version(user_id.to_string(), state.clone(), base_version)
+        .await
+        .map_err(|error| format!("替换笔记本状态失败: {error}"))?
+    {
+        Some(version) => Ok(ApplyResult::Accepted { version }),
+        None => {
+            let (state, attachments) = read_state_and_attachments(db, user_id).await?;
+            Ok(ApplyResult::Rejected {
+                latest: ServerMessage::PushRejected { state, attachments },
+            })
+        }
+    }
 }

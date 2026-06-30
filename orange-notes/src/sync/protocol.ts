@@ -20,23 +20,15 @@ export interface RemoteNote {
   favorite: boolean;
 }
 
-export interface RemoteDeletedChange {
-  entity_type: "folder" | "note";
-  id: string;
-  deleted_at: number;
-}
-
 export interface RemoteNotebookState {
   folders: RemoteFolder[];
   notes: RemoteNote[];
-  deleted: RemoteDeletedChange[];
   version: number;
 }
 
 export type ClientMessage =
   | { type: "authenticate"; username: string; password: string }
-  | { type: "push"; state: RemoteNotebookState }
-  | { type: "request_state" };
+  | { type: "push"; state: RemoteNotebookState; base_version: number };
 
 export interface RemoteAttachmentMeta {
   file_name: string;
@@ -48,5 +40,6 @@ export type ServerMessage =
   | { type: "authenticated" }
   | { type: "authentication_failed" }
   | { type: "push_ack"; version: number }
+  | { type: "push_rejected"; state: RemoteNotebookState; attachments: RemoteAttachmentMeta[] }
   | { type: "error"; message: string }
   | { type: "state"; state: RemoteNotebookState; attachments: RemoteAttachmentMeta[] };

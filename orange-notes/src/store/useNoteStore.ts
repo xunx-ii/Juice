@@ -1,19 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import type { Folder, Note } from "@/types/note";
-import type { RemoteNotebookState, RemoteDeletedChange } from "@/sync/protocol";
+import type { RemoteNotebookState } from "@/sync/protocol";
 import { useSyncStore } from "@/sync/useSyncStore";
 
 interface PersistedData {
   folders: Folder[];
   notes: Note[];
+  syncVersion: number;
+  dirtyNotes: string[];
+  dirtyFolders: string[];
+  deletedNotes: string[];
+  deletedFolders: string[];
 }
 
 type NotePatch = Partial<
   Pick<Note, "title" | "content" | "folder" | "sortOrder" | "pinned" | "favorite">
 >;
-
-type PendingDelete = Pick<RemoteDeletedChange, "entity_type" | "id">;
 
 interface NoteStore {
   folders: Folder[];
@@ -25,11 +28,11 @@ interface NoteStore {
   expandedFolders: Set<string>;
   loading: boolean;
   error: string | null;
-
-  // Entities deleted locally but not yet acknowledged by a successful sync.
-  // Pure deletes are otherwise invisible to the server because payloads only
-  // contain current folders/notes.
-  pendingDeletes: Map<string, PendingDelete>;
+  syncVersion: number;
+  dirtyNotes: Set<string>;
+  dirtyFolders: Set<string>;
+  deletedNotes: Set<string>;
+  deletedFolders: Set<string>;
 
   initialize: () => Promise<void>;
   createNote: (folderId: string) => Promise<void>;
@@ -52,6 +55,10 @@ interface NoteStore {
   // Sync helpers
   getSyncPayload: () => RemoteNotebookState;
   applyRemoteChanges: (state: RemoteNotebookState) => Promise<void>;
+  mergeRemoteSnapshot: (state: RemoteNotebookState) => Promise<void>;
+  markSynced: (version: number) => Promise<void>;
+  hasContent: () => boolean;
+  hasLocalChanges: () => boolean;
 }
 
 function readDarkMode(): boolean {
@@ -71,16 +78,18 @@ async function loadNotebook(): Promise<PersistedData> {
   return invoke<PersistedData>("load_notebook");
 }
 
-function deleteKey(entityType: RemoteDeletedChange["entity_type"], id: string) {
-  return `${entityType}:${id}`;
-}
-
-function addPendingDelete(
-  pendingDeletes: Map<string, PendingDelete>,
-  entityType: RemoteDeletedChange["entity_type"],
-  id: string
-) {
-  pendingDeletes.set(deleteKey(entityType, id), { entity_type: entityType, id });
+async function persistSyncMarkers() {
+  const state = useNoteStore.getState();
+  try {
+    await invoke("set_sync_markers", {
+      dirtyNotes: Array.from(state.dirtyNotes),
+      dirtyFolders: Array.from(state.dirtyFolders),
+      deletedNotes: Array.from(state.deletedNotes),
+      deletedFolders: Array.from(state.deletedFolders),
+    });
+  } catch (error) {
+    console.warn("Failed to persist sync markers", error);
+  }
 }
 
 function collectDescendantFolderIds(folders: Folder[], rootId: string): string[] {
@@ -106,6 +115,59 @@ function collectDescendantFolderIds(folders: Folder[], rootId: string): string[]
   return result;
 }
 
+function payloadToLocal(state: RemoteNotebookState) {
+  const folders: Folder[] = state.folders.map((rf) => ({
+    id: rf.id,
+    name: rf.name,
+    sortOrder: rf.sort_order,
+    parentId: rf.parent_id,
+  }));
+  const notes: Note[] = state.notes.map((rn) => ({
+    id: rn.id,
+    title: rn.title,
+    content: rn.content,
+    folder: rn.folder,
+    createdAt: rn.created_at,
+    updatedAt: rn.updated_at,
+    sortOrder: rn.sort_order,
+    pinned: rn.pinned,
+    favorite: rn.favorite,
+  }));
+  return { folders, notes };
+}
+
+function localToPayload(
+  folders: Folder[],
+  notes: Note[],
+  version: number
+): RemoteNotebookState {
+  return {
+    folders: folders.map((f) => ({
+      id: f.id,
+      name: f.name,
+      sort_order: f.sortOrder,
+      parent_id: f.parentId,
+      updated_at: 0,
+    })),
+    notes: notes.map((n) => ({
+      id: n.id,
+      title: n.title,
+      content: n.content,
+      folder: n.folder,
+      created_at: n.createdAt,
+      updated_at: n.updatedAt,
+      sort_order: n.sortOrder,
+      pinned: n.pinned,
+      favorite: n.favorite,
+    })),
+    version,
+  };
+}
+
+function deleteMany<T>(set: Set<T>, values: Iterable<T>) {
+  for (const value of values) set.delete(value);
+}
+
 export const useNoteStore = create<NoteStore>((set, get) => ({
   folders: [],
   notes: [],
@@ -116,7 +178,11 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
   expandedFolders: new Set<string>(),
   loading: true,
   error: null,
-  pendingDeletes: new Map<string, PendingDelete>(),
+  syncVersion: 0,
+  dirtyNotes: new Set<string>(),
+  dirtyFolders: new Set<string>(),
+  deletedNotes: new Set<string>(),
+  deletedFolders: new Set<string>(),
 
   initialize: async () => {
     try {
@@ -130,6 +196,11 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
       set({
         folders: data.folders,
         notes: data.notes,
+        syncVersion: data.syncVersion,
+        dirtyNotes: new Set(data.dirtyNotes),
+        dirtyFolders: new Set(data.dirtyFolders),
+        deletedNotes: new Set(data.deletedNotes),
+        deletedFolders: new Set(data.deletedFolders),
         loading: false,
         expandedFolders: defaultExpanded,
         activeNoteId: data.notes[0]?.id ?? null,
@@ -146,8 +217,11 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
       set((state) => ({
         notes: [...state.notes, newNote],
         activeNoteId: newNote.id,
+        dirtyNotes: new Set([...state.dirtyNotes, newNote.id]),
+        deletedNotes: new Set([...state.deletedNotes].filter((noteId) => noteId !== newNote.id)),
       }));
-      useSyncStore.getState().scheduleSync();
+      await persistSyncMarkers();
+      useSyncStore.getState().schedulePush();
     } catch (error) {
       setAsyncError(error, "创建笔记失败");
     }
@@ -158,15 +232,17 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
       await invoke("delete_note", { id });
       set((state) => {
         const notes = state.notes.filter((n) => n.id !== id);
-        const pendingDeletes = new Map(state.pendingDeletes);
-        addPendingDelete(pendingDeletes, "note", id);
+        const dirtyNotes = new Set(state.dirtyNotes);
+        dirtyNotes.delete(id);
         return {
           notes,
           activeNoteId: state.activeNoteId === id ? notes[0]?.id ?? null : state.activeNoteId,
-          pendingDeletes,
+          dirtyNotes,
+          deletedNotes: new Set([...state.deletedNotes, id]),
         };
       });
-      useSyncStore.getState().scheduleSync();
+      await persistSyncMarkers();
+      useSyncStore.getState().schedulePush();
     } catch (error) {
       setAsyncError(error, "删除笔记失败");
     }
@@ -174,17 +250,23 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
 
   updateNote: async (id: string, data: NotePatch) => {
     const previous = get().notes;
+    const wasDirty = get().dirtyNotes.has(id);
     const now = Date.now();
     const next = previous.map((note) =>
       note.id === id ? { ...note, ...data, updatedAt: now } : note
     );
-    set({ notes: next });
+    set((state) => ({ notes: next, dirtyNotes: new Set([...state.dirtyNotes, id]) }));
 
     try {
       await invoke("update_note", { id, patch: data });
-      useSyncStore.getState().scheduleSync();
+      await persistSyncMarkers();
+      useSyncStore.getState().schedulePush();
     } catch (error) {
-      set({ notes: previous });
+      set((state) => {
+        const dirtyNotes = new Set(state.dirtyNotes);
+        if (!wasDirty) dirtyNotes.delete(id);
+        return { notes: previous, dirtyNotes };
+      });
       setAsyncError(error, "保存笔记失败");
     }
   },
@@ -203,8 +285,10 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
           ...get().expandedFolders,
           targetFolderId,
         ]),
+        dirtyNotes: new Set([...get().dirtyNotes, noteId]),
       });
-      useSyncStore.getState().scheduleSync();
+      await persistSyncMarkers();
+      useSyncStore.getState().schedulePush();
     } catch (error) {
       setAsyncError(error, "移动笔记失败");
     }
@@ -218,13 +302,18 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
       set((state) => ({
         folders: [...state.folders, folder],
         expandedFolders: new Set([...state.expandedFolders, folder.id]),
+        dirtyFolders: new Set([...state.dirtyFolders, folder.id]),
+        deletedFolders: new Set(
+          [...state.deletedFolders].filter((folderId) => folderId !== folder.id)
+        ),
       }));
       if (parentId) {
         set((state) => ({
           expandedFolders: new Set([...state.expandedFolders, parentId]),
         }));
       }
-      useSyncStore.getState().scheduleSync();
+      await persistSyncMarkers();
+      useSyncStore.getState().schedulePush();
     } catch (error) {
       setAsyncError(error, "创建文件夹失败");
     }
@@ -232,12 +321,21 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
 
   renameFolder: async (id: string, name: string) => {
     const previous = get().folders;
-    set({ folders: previous.map((folder) => (folder.id === id ? { ...folder, name } : folder)) });
+    const wasDirty = get().dirtyFolders.has(id);
+    set((state) => ({
+      folders: previous.map((folder) => (folder.id === id ? { ...folder, name } : folder)),
+      dirtyFolders: new Set([...state.dirtyFolders, id]),
+    }));
     try {
       await invoke("rename_folder", { id, name });
-      useSyncStore.getState().scheduleSync();
+      await persistSyncMarkers();
+      useSyncStore.getState().schedulePush();
     } catch (error) {
-      set({ folders: previous });
+      set((state) => {
+        const dirtyFolders = new Set(state.dirtyFolders);
+        if (!wasDirty) dirtyFolders.delete(id);
+        return { folders: previous, dirtyFolders };
+      });
       setAsyncError(error, "重命名文件夹失败");
     }
   },
@@ -246,7 +344,10 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
     const previousFolders = get().folders;
     const previousNotes = get().notes;
     const previousActive = get().activeNoteId;
-    const previousPendingDeletes = get().pendingDeletes;
+    const previousDirtyNotes = new Set(get().dirtyNotes);
+    const previousDirtyFolders = new Set(get().dirtyFolders);
+    const previousDeletedNotes = new Set(get().deletedNotes);
+    const previousDeletedFolders = new Set(get().deletedFolders);
     const deletedFolderIds = collectDescendantFolderIds(previousFolders, id);
     const deletedFolderSet = new Set(deletedFolderIds);
     const deletedNoteIds = previousNotes
@@ -254,20 +355,22 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
       .map((note) => note.id);
     const notes = previousNotes.filter((note) => !deletedFolderSet.has(note.folder));
     const folders = previousFolders.filter((folder) => !deletedFolderSet.has(folder.id));
-    const pendingDeletes = new Map(get().pendingDeletes);
-    for (const noteId of deletedNoteIds) {
-      addPendingDelete(pendingDeletes, "note", noteId);
-    }
-    for (const folderId of deletedFolderIds) {
-      addPendingDelete(pendingDeletes, "folder", folderId);
-    }
-    set({
-      folders,
-      notes,
-      activeNoteId: notes.some((note) => note.id === previousActive)
-        ? previousActive
-        : notes[0]?.id ?? null,
-      pendingDeletes,
+    set((state) => {
+      const dirtyNotes = new Set(state.dirtyNotes);
+      const dirtyFolders = new Set(state.dirtyFolders);
+      deleteMany(dirtyNotes, deletedNoteIds);
+      deleteMany(dirtyFolders, deletedFolderIds);
+      return {
+        folders,
+        notes,
+        activeNoteId: notes.some((note) => note.id === previousActive)
+          ? previousActive
+          : notes[0]?.id ?? null,
+        dirtyNotes,
+        dirtyFolders,
+        deletedNotes: new Set([...state.deletedNotes, ...deletedNoteIds]),
+        deletedFolders: new Set([...state.deletedFolders, ...deletedFolderIds]),
+      };
     });
 
     try {
@@ -279,13 +382,17 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
           ? state.activeNoteId
           : data.notes[0]?.id ?? null,
       }));
-      useSyncStore.getState().scheduleSync();
+      await persistSyncMarkers();
+      useSyncStore.getState().schedulePush();
     } catch (error) {
       set({
         folders: previousFolders,
         notes: previousNotes,
         activeNoteId: previousActive,
-        pendingDeletes: previousPendingDeletes,
+        dirtyNotes: previousDirtyNotes,
+        dirtyFolders: previousDirtyFolders,
+        deletedNotes: previousDeletedNotes,
+        deletedFolders: previousDeletedFolders,
       });
       setAsyncError(error, "删除文件夹失败");
     }
@@ -298,8 +405,10 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
         folders: data.folders,
         notes: data.notes,
         expandedFolders: new Set(get().expandedFolders),
+        dirtyFolders: new Set([...get().dirtyFolders, folderId]),
       });
-      useSyncStore.getState().scheduleSync();
+      await persistSyncMarkers();
+      useSyncStore.getState().schedulePush();
     } catch (error) {
       setAsyncError(error, "移动文件夹失败");
     }
@@ -323,8 +432,10 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
           ...get().expandedFolders,
           ...(targetParentId ? [targetParentId] : []),
         ]),
+        dirtyFolders: new Set([...get().dirtyFolders, folderId]),
       });
-      useSyncStore.getState().scheduleSync();
+      await persistSyncMarkers();
+      useSyncStore.getState().schedulePush();
     } catch (error) {
       setAsyncError(error, "移动文件夹失败");
     }
@@ -355,84 +466,105 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
   },
 
   getSyncPayload: (): RemoteNotebookState => {
-    const { folders, notes, pendingDeletes } = get();
-
-    const deletedAt = Date.now();
-    const deleted: RemoteDeletedChange[] = Array.from(pendingDeletes.values()).map((item) => ({
-      ...item,
-      deleted_at: deletedAt,
-    }));
-
-    return {
-      folders: folders.map((f) => ({
-        id: f.id,
-        name: f.name,
-        sort_order: f.sortOrder,
-        parent_id: f.parentId,
-        updated_at: 0,
-      })),
-      notes: notes.map((n) => ({
-        id: n.id,
-        title: n.title,
-        content: n.content,
-        folder: n.folder,
-        created_at: n.createdAt,
-        updated_at: n.updatedAt,
-        sort_order: n.sortOrder,
-        pinned: n.pinned,
-        favorite: n.favorite,
-      })),
-      deleted,
-      version: Date.now(),
-    };
+    const { folders, notes } = get();
+    return localToPayload(folders, notes, Date.now());
   },
 
   applyRemoteChanges: async (state: RemoteNotebookState) => {
-    const folders: Folder[] = state.folders.map((rf) => ({
-      id: rf.id,
-      name: rf.name,
-      sortOrder: rf.sort_order,
-      parentId: rf.parent_id,
-    }));
-    const notes: Note[] = state.notes.map((rn) => ({
-      id: rn.id,
-      title: rn.title,
-      content: rn.content,
-      folder: rn.folder,
-      createdAt: rn.created_at,
-      updatedAt: rn.updated_at,
-      sortOrder: rn.sort_order,
-      pinned: rn.pinned,
-      favorite: rn.favorite,
-    }));
-    const deletedFolderIds = new Set(
-      state.deleted.filter((deleted) => deleted.entity_type === "folder").map((deleted) => deleted.id)
-    );
-    const deletedNoteIds = new Set(
-      state.deleted.filter((deleted) => deleted.entity_type === "note").map((deleted) => deleted.id)
-    );
-    const acknowledgedDeletes = new Set(
-      state.deleted.map((deleted) => deleteKey(deleted.entity_type, deleted.id))
-    );
-    const pendingDeletes = new Map(get().pendingDeletes);
-    for (const key of acknowledgedDeletes) {
-      pendingDeletes.delete(key);
-    }
+    const { folders, notes } = payloadToLocal(state);
 
-    set({
-      folders: folders.filter((f) => !deletedFolderIds.has(f.id)),
-      notes: notes.filter((n) => !deletedNoteIds.has(n.id)),
-      pendingDeletes,
-    });
-
-    // Persist to local SQLite.
     await invoke("apply_remote_notebook", {
       remoteFolders: state.folders,
       remoteNotes: state.notes,
-      remoteDeleted: state.deleted,
-    }).catch((e) => {
-      // local persist failure — non-fatal, next local sync will overwrite.
-      console.warn("Failed to persist remote state locally", e);
+      version: state.version,
+      clearChanges: true,
     });
+
+    set({
+      folders,
+      notes,
+      syncVersion: state.version,
+      dirtyNotes: new Set<string>(),
+      dirtyFolders: new Set<string>(),
+      deletedNotes: new Set<string>(),
+      deletedFolders: new Set<string>(),
+      activeNoteId: notes.some((note) => note.id === get().activeNoteId)
+        ? get().activeNoteId
+        : notes[0]?.id ?? null,
+    });
+  },
+
+  mergeRemoteSnapshot: async (state: RemoteNotebookState) => {
+    const remote = payloadToLocal(state);
+    const local = get();
+    const foldersById = new Map<string, Folder>();
+    for (const folder of remote.folders) foldersById.set(folder.id, folder);
+    for (const folder of local.folders) {
+      if (local.dirtyFolders.has(folder.id)) foldersById.set(folder.id, folder);
+    }
+    for (const folderId of local.deletedFolders) foldersById.delete(folderId);
+
+    const folderIds = new Set(foldersById.keys());
+    const notesById = new Map<string, Note>();
+    for (const note of remote.notes) {
+      if (folderIds.has(note.folder)) notesById.set(note.id, note);
+    }
+    for (const note of local.notes) {
+      if (!folderIds.has(note.folder) || !local.dirtyNotes.has(note.id)) continue;
+      const existing = notesById.get(note.id);
+      if (!existing || note.updatedAt >= existing.updatedAt) {
+        notesById.set(note.id, note);
+      }
+    }
+    for (const noteId of local.deletedNotes) notesById.delete(noteId);
+
+    const folders = Array.from(foldersById.values()).sort(
+        (a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name, "zh-CN")
+      );
+    const notes = Array.from(notesById.values()).sort(
+        (a, b) =>
+          a.folder.localeCompare(b.folder) ||
+          a.sortOrder - b.sortOrder ||
+          b.updatedAt - a.updatedAt
+      );
+    const payload = {
+      ...state,
+      ...localToPayload(folders, notes, state.version),
+    };
+
+    await invoke("apply_remote_notebook", {
+      remoteFolders: payload.folders,
+      remoteNotes: payload.notes,
+      version: state.version,
+      clearChanges: false,
+    });
+
+    set({
+      folders,
+      notes,
+      syncVersion: state.version,
+    });
+  },
+
+  markSynced: async (version: number) => {
+    await invoke("set_sync_version", { version });
+    set({
+      syncVersion: version,
+      dirtyNotes: new Set<string>(),
+      dirtyFolders: new Set<string>(),
+      deletedNotes: new Set<string>(),
+      deletedFolders: new Set<string>(),
+    });
+  },
+
+  hasContent: () => get().folders.length > 0 || get().notes.length > 0,
+  hasLocalChanges: () => {
+    const state = get();
+    return (
+      state.dirtyNotes.size > 0 ||
+      state.dirtyFolders.size > 0 ||
+      state.deletedNotes.size > 0 ||
+      state.deletedFolders.size > 0
+    );
   },
 }));
