@@ -3,6 +3,7 @@ import { create } from "zustand";
 import type { RemoteAttachmentMeta } from "./protocol";
 import { syncClient, SyncClient, type RemoteStateMessage } from "./client";
 import { useNoteStore } from "../store/useNoteStore";
+import { notifyNoteImageAvailable } from "@/lib/noteImageEvents";
 
 const IMAGE_TOKEN_RE = /!\[\[([^\]\r\n]+)\]\]/g;
 const STORAGE_KEY = "orange-notes-sync-settings";
@@ -137,7 +138,10 @@ async function applyIncomingState(message: RemoteStateMessage) {
     return;
   }
 
-  if (message.state.version <= localVersion) return;
+  if (message.state.version <= localVersion) {
+    await store.downloadNewImages(message.attachments);
+    return;
+  }
 
   if (store.syncing || pushTimer || noteStore.hasLocalChanges()) {
     deferredRemoteState = message;
@@ -319,6 +323,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
 
       const bytes = Array.from(new Uint8Array(await response.arrayBuffer()));
       await invoke("save_synced_image", { fileName, mime, bytes });
+      notifyNoteImageAvailable(fileName);
     } catch {
       // Remote images are retried on the next state broadcast.
     }

@@ -30,6 +30,10 @@ import {
 } from "@/components/ui/dialog";
 import { useNoteStore } from "@/store/useNoteStore";
 import { useDebounce } from "@/hooks/useDebounce";
+import {
+  NOTE_IMAGE_AVAILABLE_EVENT,
+  noteImageAvailableFileName,
+} from "@/lib/noteImageEvents";
 
 const IMAGE_TOKEN_RE = /!\[\[([^\]\r\n]+)\]\]/g;
 const EMPTY_EDITOR_MIN_HEIGHT = 96;
@@ -121,6 +125,19 @@ function NoteImage({
   useEffect(() => {
     setSrc(imageUrlCache.get(fileName) ?? "");
     setFailed(false);
+  }, [fileName]);
+
+  useEffect(() => {
+    const handleImageAvailable = (event: Event) => {
+      if (noteImageAvailableFileName(event) !== fileName) return;
+      setFailed(false);
+      setSrc(imageUrlCache.get(fileName) ?? "");
+    };
+
+    window.addEventListener(NOTE_IMAGE_AVAILABLE_EVENT, handleImageAvailable);
+    return () => {
+      window.removeEventListener(NOTE_IMAGE_AVAILABLE_EVENT, handleImageAvailable);
+    };
   }, [fileName]);
 
   useEffect(() => {
