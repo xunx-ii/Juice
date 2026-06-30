@@ -77,14 +77,6 @@ function extractImageTokens(content: string): string[] {
   return result;
 }
 
-function httpBaseFromSyncAddress(address: string): string {
-  let httpBase = address.trim();
-  if (httpBase.startsWith("ws://")) httpBase = "http://" + httpBase.slice(5);
-  else if (httpBase.startsWith("wss://")) httpBase = "https://" + httpBase.slice(6);
-  else if (!httpBase.startsWith("http")) httpBase = "http://" + httpBase;
-  return httpBase.replace(/\/$/, "");
-}
-
 function syncAuthHeaders(settings: SyncSettings): HeadersInit {
   return {
     "x-orange-notes-user": settings.username,
@@ -287,7 +279,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     const { settings } = get();
     if (!hasCompleteSettings(settings)) return;
 
-    const httpBase = httpBaseFromSyncAddress(settings.address);
+    const httpBase = SyncClient.httpBaseUrl(settings.address);
     const allNames = new Set<string>();
     for (const note of useNoteStore.getState().notes) {
       for (const name of extractImageTokens(note.content)) {
@@ -318,7 +310,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     const { settings } = get();
     if (!hasCompleteSettings(settings)) return;
 
-    const httpBase = httpBaseFromSyncAddress(settings.address);
+    const httpBase = SyncClient.httpBaseUrl(settings.address);
     const url = `${httpBase}/api/sync/files/${encodeURIComponent(settings.username)}/${encodeURIComponent(fileName)}`;
 
     try {

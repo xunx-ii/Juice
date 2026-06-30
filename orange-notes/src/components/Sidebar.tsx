@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useSyncStore } from "@/sync/useSyncStore";
+import { SyncClient } from "@/sync/client";
 
 function SyncSettingsSection() {
   const {
@@ -51,12 +52,7 @@ function SyncSettingsSection() {
     setRegStatus("loading");
     setRegMessage("注册中…");
     try {
-      // Derive HTTP base from WS address.
-      let httpBase = address.trim();
-      if (httpBase.startsWith("ws://")) httpBase = "http://" + httpBase.slice(5);
-      else if (httpBase.startsWith("wss://")) httpBase = "https://" + httpBase.slice(6);
-      else if (!httpBase.startsWith("http")) httpBase = "http://" + httpBase;
-      httpBase = httpBase.replace(/\/$/, "");
+      const httpBase = SyncClient.httpBaseUrl(address);
 
       const r = await fetch(`${httpBase}/api/admin/register`, {
         method: "POST",

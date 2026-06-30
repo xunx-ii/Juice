@@ -65,12 +65,41 @@ export class SyncClient {
     this.stateHandlers.delete(handler);
   }
 
-  static resolveUrl(address: string): string {
+  private static normalizeServerAddress(address: string): {
+    host: string;
+    path: string;
+    secure: boolean;
+  } {
     const trimmed = address.trim();
-    if (trimmed.startsWith("ws://") || trimmed.startsWith("wss://")) return trimmed;
-    const proto = trimmed.startsWith("https://") ? "wss://" : "ws://";
-    const cleaned = trimmed.replace(/^https?:\/\//, "").replace(/\/$/, "");
-    return `${proto}${cleaned}/ws`;
+    if (!trimmed) throw new Error("服务器地址不能为空");
+
+    const withScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed)
+      ? trimmed
+      : `http://${trimmed}`;
+    const parsed = new URL(withScheme);
+    const protocol = parsed.protocol.toLowerCase();
+    if (!["http:", "https:", "ws:", "wss:"].includes(protocol)) {
+      throw new Error("服务器地址协议不支持");
+    }
+
+    const secure = protocol === "https:" || protocol === "wss:";
+    let path = parsed.pathname.replace(/\/+$/, "");
+    if (path === "/") path = "";
+    if (path.endsWith("/ws")) path = path.slice(0, -3);
+
+    return { host: parsed.host, path, secure };
+  }
+
+  static resolveUrl(address: string): string {
+    const { host, path, secure } = SyncClient.normalizeServerAddress(address);
+    const proto = secure ? "wss://" : "ws://";
+    return `${proto}${host}${path}/ws`;
+  }
+
+  static httpBaseUrl(address: string): string {
+    const { host, path, secure } = SyncClient.normalizeServerAddress(address);
+    const proto = secure ? "https://" : "http://";
+    return `${proto}${host}${path}`;
   }
 
   static loginUrl(address: string, username: string): string {
@@ -78,20 +107,22 @@ export class SyncClient {
   }
 
   connect(url: string, username: string, password: string): Promise<void> {
+    const sameConnection =
+      this.url === url && this.username === username && this.password === password;
+
     if (
-      this.url === url &&
-      this.username === username &&
+      sameConnection &&
       this.isConnected() &&
       this.authenticated
     ) {
       return Promise.resolve();
     }
 
-    if (this.connectPromise && this.url === url && this.username === username) {
+    if (this.connectPromise && sameConnection) {
       return this.connectPromise;
     }
 
-    this.disconnect();
+    this.disconnect(this.connectPromise ? "同步连接已切换" : "同步连接已关闭");
     this.url = url;
     this.username = username;
     this.password = password;
@@ -129,13 +160,9 @@ export class SyncClient {
         const wasAuthenticated = this.authenticated;
         const error = new Error(wasAuthenticated ? "同步连接已断开" : "同步连接已关闭");
         this.authenticated = false;
-        this.connectReject?.(error);
-        this.connectReject = null;
-        this.connectResolve = null;
+        this.rejectPendingConnection(error);
         this.notify(error.message);
         this.failPending(error);
-        this.clearConnectTimer();
-        this.connectPromise = null;
       };
 
       this.connectTimer = setTimeout(() => {
@@ -169,12 +196,12 @@ export class SyncClient {
     });
   }
 
-  disconnect() {
-    this.clearConnectTimer();
+  disconnect(reason = "同步连接已关闭") {
+    const error = new Error(reason);
+    this.rejectPendingConnection(error);
     this.closeWebSocket();
     this.authenticated = false;
-    this.connectPromise = null;
-    this.failPending(new Error("同步连接已关闭"));
+    this.failPending(error);
     this.notify(null);
   }
 
@@ -236,6 +263,10 @@ export class SyncClient {
       }
 
       case "error":
+        if (!this.authenticated || this.connectReject) {
+          this.failConnection(new Error(message.message));
+          return;
+        }
         this.notify(message.message);
         this.failPending(new Error(message.message));
         break;
@@ -249,15 +280,19 @@ export class SyncClient {
   }
 
   private failConnection(error: Error) {
+    this.rejectPendingConnection(error);
+    this.authenticated = false;
+    this.closeWebSocket();
+    this.failPending(error);
+    this.notify(error.message);
+  }
+
+  private rejectPendingConnection(error: Error) {
     this.clearConnectTimer();
     this.connectReject?.(error);
     this.connectReject = null;
     this.connectResolve = null;
     this.connectPromise = null;
-    this.authenticated = false;
-    this.closeWebSocket();
-    this.failPending(error);
-    this.notify(error.message);
   }
 
   private failPending(error: Error) {

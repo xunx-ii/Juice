@@ -168,6 +168,43 @@ function deleteMany<T>(set: Set<T>, values: Iterable<T>) {
   for (const value of values) set.delete(value);
 }
 
+function collectChangedNoteIds(previous: Note[], next: Note[]): Set<string> {
+  const previousById = new Map(previous.map((note) => [note.id, note]));
+  const changed = new Set<string>();
+  for (const note of next) {
+    const before = previousById.get(note.id);
+    if (
+      !before ||
+      before.title !== note.title ||
+      before.content !== note.content ||
+      before.folder !== note.folder ||
+      before.sortOrder !== note.sortOrder ||
+      before.pinned !== note.pinned ||
+      before.favorite !== note.favorite
+    ) {
+      changed.add(note.id);
+    }
+  }
+  return changed;
+}
+
+function collectChangedFolderIds(previous: Folder[], next: Folder[]): Set<string> {
+  const previousById = new Map(previous.map((folder) => [folder.id, folder]));
+  const changed = new Set<string>();
+  for (const folder of next) {
+    const before = previousById.get(folder.id);
+    if (
+      !before ||
+      before.name !== folder.name ||
+      before.parentId !== folder.parentId ||
+      before.sortOrder !== folder.sortOrder
+    ) {
+      changed.add(folder.id);
+    }
+  }
+  return changed;
+}
+
 export const useNoteStore = create<NoteStore>((set, get) => ({
   folders: [],
   notes: [],
@@ -273,20 +310,23 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
 
   reorderNote: async (noteId: string, targetFolderId: string, targetIndex: number) => {
     try {
+      const previousNotes = get().notes;
       const data = await invoke<PersistedData>("reorder_note", {
         noteId,
         targetFolderId,
         targetIndex,
       });
-      set({
+      const dirtyNoteIds = collectChangedNoteIds(previousNotes, data.notes);
+      dirtyNoteIds.add(noteId);
+      set((state) => ({
         folders: data.folders,
         notes: data.notes,
         expandedFolders: new Set([
-          ...get().expandedFolders,
+          ...state.expandedFolders,
           targetFolderId,
         ]),
-        dirtyNotes: new Set([...get().dirtyNotes, noteId]),
-      });
+        dirtyNotes: new Set([...state.dirtyNotes, ...dirtyNoteIds]),
+      }));
       await persistSyncMarkers();
       useSyncStore.getState().schedulePush();
     } catch (error) {
@@ -400,13 +440,16 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
 
   reorderFolder: async (folderId: string, targetIndex: number) => {
     try {
+      const previousFolders = get().folders;
       const data = await invoke<PersistedData>("reorder_folder", { folderId, targetIndex });
-      set({
+      const dirtyFolderIds = collectChangedFolderIds(previousFolders, data.folders);
+      dirtyFolderIds.add(folderId);
+      set((state) => ({
         folders: data.folders,
         notes: data.notes,
-        expandedFolders: new Set(get().expandedFolders),
-        dirtyFolders: new Set([...get().dirtyFolders, folderId]),
-      });
+        expandedFolders: new Set(state.expandedFolders),
+        dirtyFolders: new Set([...state.dirtyFolders, ...dirtyFolderIds]),
+      }));
       await persistSyncMarkers();
       useSyncStore.getState().schedulePush();
     } catch (error) {
@@ -420,20 +463,23 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
     targetIndex: number
   ) => {
     try {
+      const previousFolders = get().folders;
       const data = await invoke<PersistedData>("move_folder", {
         folderId,
         targetParentId: targetParentId ?? null,
         targetIndex,
       });
-      set({
+      const dirtyFolderIds = collectChangedFolderIds(previousFolders, data.folders);
+      dirtyFolderIds.add(folderId);
+      set((state) => ({
         folders: data.folders,
         notes: data.notes,
         expandedFolders: new Set([
-          ...get().expandedFolders,
+          ...state.expandedFolders,
           ...(targetParentId ? [targetParentId] : []),
         ]),
-        dirtyFolders: new Set([...get().dirtyFolders, folderId]),
-      });
+        dirtyFolders: new Set([...state.dirtyFolders, ...dirtyFolderIds]),
+      }));
       await persistSyncMarkers();
       useSyncStore.getState().schedulePush();
     } catch (error) {
@@ -511,10 +557,7 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
     }
     for (const note of local.notes) {
       if (!folderIds.has(note.folder) || !local.dirtyNotes.has(note.id)) continue;
-      const existing = notesById.get(note.id);
-      if (!existing || note.updatedAt >= existing.updatedAt) {
-        notesById.set(note.id, note);
-      }
+      notesById.set(note.id, note);
     }
     for (const noteId of local.deletedNotes) notesById.delete(noteId);
 
