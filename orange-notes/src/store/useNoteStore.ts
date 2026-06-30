@@ -3,6 +3,7 @@ import { create } from "zustand";
 import type { Folder, Note } from "@/types/note";
 import type { RemoteNotebookState } from "@/sync/protocol";
 import { useSyncStore } from "@/sync/useSyncStore";
+import { notifyNoteImagesDeleted } from "@/lib/noteImageEvents";
 
 interface PersistedData {
   folders: Folder[];
@@ -266,7 +267,8 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
 
   deleteNote: async (id: string) => {
     try {
-      await invoke("delete_note", { id });
+      const deletedImages = await invoke<string[]>("delete_note", { id });
+      notifyNoteImagesDeleted(deletedImages);
       set((state) => {
         const notes = state.notes.filter((n) => n.id !== id);
         const dirtyNotes = new Set(state.dirtyNotes);
@@ -295,7 +297,8 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
     set((state) => ({ notes: next, dirtyNotes: new Set([...state.dirtyNotes, id]) }));
 
     try {
-      await invoke("update_note", { id, patch: data });
+      const deletedImages = await invoke<string[]>("update_note", { id, patch: data });
+      notifyNoteImagesDeleted(deletedImages);
       await persistSyncMarkers();
       useSyncStore.getState().schedulePush();
     } catch (error) {
@@ -519,12 +522,13 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
   applyRemoteChanges: async (state: RemoteNotebookState) => {
     const { folders, notes } = payloadToLocal(state);
 
-    await invoke("apply_remote_notebook", {
+    const deletedImages = await invoke<string[]>("apply_remote_notebook", {
       remoteFolders: state.folders,
       remoteNotes: state.notes,
       version: state.version,
       clearChanges: true,
     });
+    notifyNoteImagesDeleted(deletedImages);
 
     set({
       folders,
@@ -575,12 +579,13 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
       ...localToPayload(folders, notes, state.version),
     };
 
-    await invoke("apply_remote_notebook", {
+    const deletedImages = await invoke<string[]>("apply_remote_notebook", {
       remoteFolders: payload.folders,
       remoteNotes: payload.notes,
       version: state.version,
       clearChanges: false,
     });
+    notifyNoteImagesDeleted(deletedImages);
 
     set({
       folders,

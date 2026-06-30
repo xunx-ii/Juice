@@ -32,7 +32,9 @@ import { useNoteStore } from "@/store/useNoteStore";
 import { useDebounce } from "@/hooks/useDebounce";
 import {
   NOTE_IMAGE_AVAILABLE_EVENT,
+  NOTE_IMAGE_DELETED_EVENT,
   noteImageAvailableFileName,
+  noteImageDeletedFileName,
 } from "@/lib/noteImageEvents";
 
 const IMAGE_TOKEN_RE = /!\[\[([^\]\r\n]+)\]\]/g;
@@ -137,6 +139,20 @@ function NoteImage({
     window.addEventListener(NOTE_IMAGE_AVAILABLE_EVENT, handleImageAvailable);
     return () => {
       window.removeEventListener(NOTE_IMAGE_AVAILABLE_EVENT, handleImageAvailable);
+    };
+  }, [fileName]);
+
+  useEffect(() => {
+    const handleImageDeleted = (event: Event) => {
+      if (noteImageDeletedFileName(event) !== fileName) return;
+      revokeCachedImage(fileName);
+      setSrc("");
+      setFailed(true);
+    };
+
+    window.addEventListener(NOTE_IMAGE_DELETED_EVENT, handleImageDeleted);
+    return () => {
+      window.removeEventListener(NOTE_IMAGE_DELETED_EVENT, handleImageDeleted);
     };
   }, [fileName]);
 

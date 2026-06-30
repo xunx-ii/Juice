@@ -78,6 +78,21 @@ function extractImageTokens(content: string): string[] {
   return result;
 }
 
+function referencedImagesFromRemoteState(message: RemoteStateMessage): Set<string> {
+  const names = new Set<string>();
+  for (const note of message.state.notes) {
+    for (const name of extractImageTokens(note.content)) {
+      names.add(name);
+    }
+  }
+  return names;
+}
+
+function filterReferencedAttachments(message: RemoteStateMessage): RemoteAttachmentMeta[] {
+  const referenced = referencedImagesFromRemoteState(message);
+  return message.attachments.filter((attachment) => referenced.has(attachment.file_name));
+}
+
 function syncAuthHeaders(settings: SyncSettings): HeadersInit {
   return {
     "x-orange-notes-user": settings.username,
@@ -114,7 +129,7 @@ function scheduleReconnect() {
 
 async function applyRemoteState(message: RemoteStateMessage) {
   await useNoteStore.getState().applyRemoteChanges(message.state);
-  await useSyncStore.getState().downloadNewImages(message.attachments);
+  await useSyncStore.getState().downloadNewImages(filterReferencedAttachments(message));
   useSyncStore.setState({
     lastSync: Date.now(),
     lastError: null,
@@ -125,7 +140,7 @@ async function applyRemoteState(message: RemoteStateMessage) {
 
 async function mergeRejectedState(message: RemoteStateMessage) {
   await useNoteStore.getState().mergeRemoteSnapshot(message.state);
-  await useSyncStore.getState().downloadNewImages(message.attachments);
+  await useSyncStore.getState().downloadNewImages(filterReferencedAttachments(message));
 }
 
 async function applyIncomingState(message: RemoteStateMessage) {
@@ -139,7 +154,7 @@ async function applyIncomingState(message: RemoteStateMessage) {
   }
 
   if (message.state.version <= localVersion) {
-    await store.downloadNewImages(message.attachments);
+    await store.downloadNewImages(filterReferencedAttachments(message));
     return;
   }
 

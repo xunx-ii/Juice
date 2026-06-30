@@ -134,9 +134,9 @@ fn cleanup_unreferenced_images(
     conn: &Connection,
     img_dir: &PathBuf,
     candidates: HashSet<String>,
-) -> Result<(), AppError> {
+) -> Result<Vec<String>, AppError> {
     if candidates.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let mut referenced = HashSet::new();
@@ -149,6 +149,7 @@ fn cleanup_unreferenced_images(
     }
 
     let canonical_img = img_dir.canonicalize()?;
+    let mut deleted = Vec::new();
     for file_name in candidates.difference(&referenced) {
         let path = img_dir.join(file_name);
         let Ok(canonical_path) = path.canonicalize() else {
@@ -156,14 +157,14 @@ fn cleanup_unreferenced_images(
         };
         if canonical_path.starts_with(&canonical_img) {
             match fs::remove_file(&canonical_path) {
-                Ok(()) => {}
+                Ok(()) => deleted.push(file_name.clone()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(AppError::Io(error)),
             }
         }
     }
 
-    Ok(())
+    Ok(deleted)
 }
 
 fn data_dir(app: &tauri::App) -> Result<PathBuf, AppError> {
@@ -235,8 +236,28 @@ fn apply_remote_notebook(
     remote_notes: Vec<RemoteNoteArg>,
     version: i64,
     clear_changes: bool,
-) -> Result<(), AppError> {
+) -> Result<Vec<String>, AppError> {
     let mut conn = state.db.lock().expect("database mutex poisoned");
+    let previous_images = {
+        let mut stmt = conn.prepare("SELECT content FROM notes")?;
+        let contents = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut images = HashSet::new();
+        for content in contents {
+            images.extend(extract_image_file_names(&content));
+        }
+        images
+    };
+    let mut remote_images = HashSet::new();
+    for note in &remote_notes {
+        remote_images.extend(extract_image_file_names(&note.content));
+    }
+    let removed_images = previous_images
+        .difference(&remote_images)
+        .cloned()
+        .collect::<HashSet<_>>();
+
     let tx = conn.transaction()?;
 
     tx.execute("DELETE FROM notes", [])?;
@@ -277,7 +298,7 @@ fn apply_remote_notebook(
         tx.execute("DELETE FROM sync_changes", [])?;
     }
     tx.commit()?;
-    Ok(())
+    cleanup_unreferenced_images(&conn, &state.img_dir, removed_images)
 }
 
 #[tauri::command]
@@ -466,7 +487,7 @@ fn create_note(state: tauri::State<'_, AppState>, folder_id: String) -> Result<N
 }
 
 #[tauri::command]
-fn delete_note(state: tauri::State<'_, AppState>, id: String) -> Result<(), AppError> {
+fn delete_note(state: tauri::State<'_, AppState>, id: String) -> Result<Vec<String>, AppError> {
     let conn = state.db.lock().expect("database mutex poisoned");
     let content = conn
         .query_row("SELECT content FROM notes WHERE id = $1", params![id], |row| {
@@ -475,12 +496,15 @@ fn delete_note(state: tauri::State<'_, AppState>, id: String) -> Result<(), AppE
         .unwrap_or_default();
     let candidates = extract_image_file_names(&content);
     conn.execute("DELETE FROM notes WHERE id = $1", params![id])?;
-    cleanup_unreferenced_images(&conn, &state.img_dir, candidates)?;
-    Ok(())
+    cleanup_unreferenced_images(&conn, &state.img_dir, candidates)
 }
 
 #[tauri::command]
-fn update_note(state: tauri::State<'_, AppState>, id: String, patch: NotePatch) -> Result<(), AppError> {
+fn update_note(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    patch: NotePatch,
+) -> Result<Vec<String>, AppError> {
     let conn = state.db.lock().expect("database mutex poisoned");
     let existing: Note = conn.query_row(
         "SELECT id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite FROM notes WHERE id = $1",
@@ -523,8 +547,7 @@ fn update_note(state: tauri::State<'_, AppState>, id: String, patch: NotePatch) 
             existing.id
         ],
     )?;
-    cleanup_unreferenced_images(&conn, &state.img_dir, removed_images)?;
-    Ok(())
+    cleanup_unreferenced_images(&conn, &state.img_dir, removed_images)
 }
 
 #[tauri::command]
@@ -658,7 +681,7 @@ fn delete_folder(state: tauri::State<'_, AppState>, id: String) -> Result<Notebo
         conn.execute("DELETE FROM notes WHERE folder = $1", params![folder_id])?;
         conn.execute("DELETE FROM folders WHERE id = $1", params![folder_id])?;
     }
-    cleanup_unreferenced_images(&conn, &state.img_dir, candidates)?;
+    let _ = cleanup_unreferenced_images(&conn, &state.img_dir, candidates)?;
     read_all(&conn)
 }
 

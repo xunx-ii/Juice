@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
+use std::collections::HashSet;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -33,6 +34,28 @@ pub struct NotebookState {
 
 pub struct Database {
     conn: Mutex<Connection>,
+}
+
+fn extract_image_file_names(content: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut rest = content;
+    while let Some(start) = rest.find("![[") {
+        let after_start = &rest[start + 3..];
+        let Some(end) = after_start.find("]]") else {
+            break;
+        };
+        let file_name = after_start[..end].trim();
+        if !file_name.is_empty()
+            && !file_name.contains('/')
+            && !file_name.contains('\\')
+            && !file_name.contains('\n')
+            && !file_name.contains('\r')
+        {
+            names.insert(file_name.to_string());
+        }
+        rest = &after_start[end + 2..];
+    }
+    names
 }
 
 impl Database {
@@ -219,6 +242,12 @@ impl Database {
             tx.execute("DELETE FROM notes WHERE user_id = ?1", params![user_id.clone()])?;
             tx.execute("DELETE FROM folders WHERE user_id = ?1", params![user_id.clone()])?;
 
+            let referenced_attachments = state
+                .notes
+                .iter()
+                .flat_map(|note| extract_image_file_names(&note.content))
+                .collect::<HashSet<_>>();
+
             for folder in state.folders {
                 tx.execute(
                     "INSERT INTO folders (id, name, sort_order, parent_id, updated_at, user_id)
@@ -250,6 +279,24 @@ impl Database {
                         note.favorite as i64,
                         user_id.clone(),
                     ],
+                )?;
+            }
+
+            let existing_attachments = {
+                let mut stmt =
+                    tx.prepare("SELECT file_name FROM attachments WHERE user_id = ?1")?;
+                let file_names = stmt
+                    .query_map(params![user_id.clone()], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                file_names
+            };
+            for file_name in existing_attachments {
+                if referenced_attachments.contains(&file_name) {
+                    continue;
+                }
+                tx.execute(
+                    "DELETE FROM attachments WHERE user_id = ?1 AND file_name = ?2",
+                    params![user_id.clone(), file_name],
                 )?;
             }
 
@@ -304,11 +351,31 @@ impl Database {
     pub async fn list_attachments(&self, user_id: &str) -> Result<Vec<(String, String)>, rusqlite::Error> {
         let user_id = user_id.to_string();
         self.conn(move |conn| {
+            let referenced = {
+                let mut stmt = conn.prepare("SELECT content FROM notes WHERE user_id = ?1")?;
+                let contents = stmt
+                    .query_map(params![user_id.clone()], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut names = HashSet::new();
+                for content in contents {
+                    names.extend(extract_image_file_names(&content));
+                }
+                names
+            };
+            if referenced.is_empty() {
+                return Ok(Vec::new());
+            }
+
             let mut stmt = conn.prepare("SELECT file_name, mime FROM attachments WHERE user_id = ?1 ORDER BY file_name ASC")?;
             let rows = stmt.query_map(params![user_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
-            rows.collect::<Result<Vec<_>, _>>()
+            let files = rows
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|(file_name, _)| referenced.contains(file_name))
+                .collect();
+            Ok(files)
         }).await
     }
 
