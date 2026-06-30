@@ -1,20 +1,26 @@
 use axum::{
     body::Bytes,
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use serde::Serialize;
 use std::sync::Arc;
 
-use crate::db::Database;
+use crate::{auth, db::Database};
+
+const SYNC_USER_HEADER: &str = "x-orange-notes-user";
+const SYNC_PASSWORD_HEADER: &str = "x-orange-notes-password";
 
 /// GET /api/sync/files/:username — list all attachment metadata for a user.
 pub async fn list_attachments(
     Path(username): Path<String>,
+    headers: HeaderMap,
     State(db): State<Arc<Database>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    require_sync_auth(&headers, db.as_ref(), &username).await?;
+
     match db.list_attachments(&username).await {
         Ok(list) => {
             let files: Vec<AttachmentMeta> = list
@@ -36,8 +42,12 @@ pub struct AttachmentMeta {
 /// GET /api/sync/files/:username/:filename — download a specific file (binary).
 pub async fn download_attachment(
     Path((username, filename)): Path<(String, String)>,
+    headers: HeaderMap,
     State(db): State<Arc<Database>>,
 ) -> Result<Response, (StatusCode, String)> {
+    require_sync_auth(&headers, db.as_ref(), &username).await?;
+    let filename = validated_filename(&filename)?;
+
     match db.get_attachment(&username, &filename).await {
         Ok(Some((mime, data))) => {
             Ok((
@@ -54,13 +64,12 @@ pub async fn download_attachment(
 /// POST /api/sync/files/:username/:filename — upload a file (binary body).
 pub async fn upload_attachment(
     Path((username, filename)): Path<(String, String)>,
+    headers: HeaderMap,
     State(db): State<Arc<Database>>,
     body: Bytes,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let filename = url_decode(&filename);
-    if filename.is_empty() || filename.contains('/') || filename.contains('\\') {
-        return Err((StatusCode::BAD_REQUEST, "无效的文件名".to_string()));
-    }
+    require_sync_auth(&headers, db.as_ref(), &username).await?;
+    let filename = validated_filename(&filename)?;
 
     // Determine MIME type from filename extension, default to octet-stream.
     let mime = guess_mime(&filename);
@@ -74,9 +83,13 @@ pub async fn upload_attachment(
 /// DELETE /api/sync/files/:username/:filename — delete a specific file.
 pub async fn delete_attachment(
     Path((username, filename)): Path<(String, String)>,
+    headers: HeaderMap,
     State(db): State<Arc<Database>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    match db.delete_attachment(&username, &url_decode(&filename)).await {
+    require_sync_auth(&headers, db.as_ref(), &username).await?;
+    let filename = validated_filename(&filename)?;
+
+    match db.delete_attachment(&username, &filename).await {
         Ok(()) => Ok(Json(serde_json::json!({ "success": true }))),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("删除失败: {}", e))),
     }
@@ -88,6 +101,44 @@ fn url_decode(s: &str) -> String {
     percent_encoding::percent_decode_str(s)
         .decode_utf8_lossy()
         .to_string()
+}
+
+fn required_header<'a>(
+    headers: &'a HeaderMap,
+    name: &'static str,
+) -> Result<&'a str, (StatusCode, String)> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "缺少同步认证信息".to_string()))
+}
+
+async fn require_sync_auth(
+    headers: &HeaderMap,
+    db: &Database,
+    username: &str,
+) -> Result<(), (StatusCode, String)> {
+    let auth_user = required_header(headers, SYNC_USER_HEADER)?;
+    let password = required_header(headers, SYNC_PASSWORD_HEADER)?;
+
+    if auth_user != username {
+        return Err((StatusCode::FORBIDDEN, "同步用户不匹配".to_string()));
+    }
+
+    match db.get_user_password_hash(auth_user.to_string()).await {
+        Ok(Some(hash)) if auth::verify_password(password, hash.as_str()) => Ok(()),
+        Ok(_) => Err((StatusCode::UNAUTHORIZED, "同步认证失败".to_string())),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("数据库错误: {}", e))),
+    }
+}
+
+fn validated_filename(raw: &str) -> Result<String, (StatusCode, String)> {
+    let filename = url_decode(raw);
+    if filename.is_empty() || filename.contains('/') || filename.contains('\\') {
+        return Err((StatusCode::BAD_REQUEST, "无效的文件名".to_string()));
+    }
+    Ok(filename)
 }
 
 fn guess_mime(filename: &str) -> String {

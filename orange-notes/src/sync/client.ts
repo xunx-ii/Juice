@@ -5,7 +5,6 @@ import type {
   ClientMessage,
   RemoteNotebookState,
   ServerMessage,
-  RemoteAttachmentMeta,
 } from "./protocol";
 import { useSyncStore } from "./useSyncStore";
 
@@ -20,6 +19,7 @@ export class SyncClient {
   private authenticated = false;
   private pendingPush: RemoteNotebookState | null = null;
   private pendingResolve: ((state: RemoteNotebookState) => void) | null = null;
+  private pendingReject: ((error: Error) => void) | null = null;
   private listeners: Set<Listener> = new Set();
   private stateHandlers: Set<StateHandler> = new Set();
   private reconnectHandler: ReturnType<typeof setTimeout> | null = null;
@@ -100,7 +100,6 @@ export class SyncClient {
       // Timeout if auth never completes.
       this.reconnectHandler = setTimeout(() => {
         if (!this.authenticated && this.connectReject === reject) {
-          this.connectReject = null;
           this.connectReject = null;
           this.connectResolve = null;
           reject(new Error("连接超时：认证未完成"));
@@ -190,6 +189,9 @@ export class SyncClient {
         this.connectReject?.(err);
         this.connectReject = null;
         this.connectResolve = null;
+        this.pendingReject?.(err);
+        this.pendingReject = null;
+        this.pendingResolve = null;
         this.notifyAll(false, "认证失败：用户名或密码错误");
         break;
       }
@@ -202,6 +204,7 @@ export class SyncClient {
         if (this.pendingResolve) {
           this.pendingResolve(msg.state);
           this.pendingResolve = null;
+          this.pendingReject = null;
         }
         this.stateHandlers.forEach((h) => h(msg.state));
         // After state is applied, download any images we're missing.
@@ -211,10 +214,16 @@ export class SyncClient {
         break;
       }
       case "error": {
+        const err = new Error(msg.message);
+        this.connectReject?.(err);
+        this.connectReject = null;
+        this.connectResolve = null;
+        this.pendingReject?.(err);
+        this.pendingReject = null;
+        this.pendingResolve = null;
         this.notifyAll(this.authenticated, msg.message);
         break;
       }
-      case "server_done": break;
     }
   }
 
@@ -239,10 +248,12 @@ export class SyncClient {
         return;
       }
       this.pendingResolve = resolve;
+      this.pendingReject = reject;
       this.sendMessage({ type: "push", state });
       setTimeout(() => {
         if (this.pendingResolve === resolve) {
           this.pendingResolve = null;
+          this.pendingReject = null;
           reject(new Error("同步超时"));
         }
       }, timeoutMs);
@@ -262,10 +273,12 @@ export class SyncClient {
         return;
       }
       this.pendingResolve = resolve;
+      this.pendingReject = reject;
       this.sendMessage({ type: "request_state" });
       setTimeout(() => {
         if (this.pendingResolve === resolve) {
           this.pendingResolve = null;
+          this.pendingReject = null;
           reject(new Error("获取状态超时"));
         }
       }, timeoutMs);
@@ -285,6 +298,7 @@ export class SyncClient {
     this.authenticated = false;
     this.pendingPush = null;
     this.pendingResolve = null;
+    this.pendingReject = null;
     this.connectResolve = null;
     this.connectReject = null;
   }

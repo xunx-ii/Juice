@@ -319,6 +319,8 @@ export function NoteEditor() {
   const [deleting, setDeleting] = useState(false);
   const [editTitle, setEditTitle] = useState(false);
   const syncedNoteIdRef = useRef<string | null>(null);
+  const contentDirtyRef = useRef(false);
+  const titleDirtyRef = useRef(false);
   const skipNextContentSaveRef = useRef(false);
   const skipNextTitleSaveRef = useRef(false);
   const pasteLockRef = useRef(false);
@@ -335,12 +337,58 @@ export function NoteEditor() {
     ) {
       skipNextContentSaveRef.current = true;
       skipNextTitleSaveRef.current = true;
+      contentDirtyRef.current = false;
+      titleDirtyRef.current = false;
       setContent(activeContent);
       setTitle(activeTitle);
       setEditTitle(false);
       syncedNoteIdRef.current = activeNoteId;
     }
   }, [activeContent, activeNoteId, activeTitle]);
+
+  useEffect(() => {
+    if (
+      activeNoteId &&
+      activeContent !== undefined &&
+      syncedNoteIdRef.current === activeNoteId &&
+      content !== activeContent
+    ) {
+      if (contentDirtyRef.current) return;
+      skipNextContentSaveRef.current = true;
+      setContent(activeContent);
+      return;
+    }
+    if (
+      activeNoteId &&
+      activeContent !== undefined &&
+      syncedNoteIdRef.current === activeNoteId &&
+      content === activeContent
+    ) {
+      contentDirtyRef.current = false;
+    }
+  }, [activeContent, activeNoteId, content]);
+
+  useEffect(() => {
+    if (
+      activeNoteId &&
+      activeTitle !== undefined &&
+      syncedNoteIdRef.current === activeNoteId &&
+      title.trim() !== activeTitle
+    ) {
+      if (titleDirtyRef.current) return;
+      skipNextTitleSaveRef.current = true;
+      setTitle(activeTitle);
+      return;
+    }
+    if (
+      activeNoteId &&
+      activeTitle !== undefined &&
+      syncedNoteIdRef.current === activeNoteId &&
+      title.trim() === activeTitle
+    ) {
+      titleDirtyRef.current = false;
+    }
+  }, [activeNoteId, activeTitle, title]);
 
   useEffect(() => {
     if (skipNextContentSaveRef.current) {
@@ -385,6 +433,7 @@ export function NoteEditor() {
 
   const handleImageRemove = useCallback(
     (nextContent: string) => {
+      contentDirtyRef.current = true;
       setContent(nextContent);
       if (activeNoteId) {
         skipNextContentSaveRef.current = true;
@@ -415,6 +464,7 @@ export function NoteEditor() {
       });
       imageUrlCache.set(saved.fileName, URL.createObjectURL(file));
       setContent((prev) => {
+        contentDirtyRef.current = true;
         const prefix = prev.length === 0 || prev.endsWith("\n") ? "" : "\n";
         return `${prev}${prefix}${imageToken(saved.fileName)}\n`;
       });
@@ -429,13 +479,10 @@ export function NoteEditor() {
     return (
       <div className="flex flex-col items-center justify-center h-full text-muted-foreground bg-background">
         <div className="text-center max-w-md">
-          <div className="mb-4 inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-muted">
-            <Edit3 className="h-8 w-8 opacity-40" />
+          <div className="mb-3 inline-flex items-center justify-center w-12 h-12 rounded-md bg-muted">
+            <Edit3 className="h-6 w-6 opacity-40" />
           </div>
-          <h2 className="text-lg font-medium mb-2">选择一个笔记</h2>
-          <p className="text-sm text-muted-foreground/70">
-            从左侧树形列表中选择一个笔记开始编辑
-          </p>
+          <h2 className="text-sm font-medium">选择一个笔记</h2>
         </div>
       </div>
     );
@@ -511,7 +558,10 @@ export function NoteEditor() {
               {editTitle ? (
                 <Input
                   value={title}
-                  onChange={(e) => setTitle(e.target.value)}
+                  onChange={(e) => {
+                    titleDirtyRef.current = true;
+                    setTitle(e.target.value);
+                  }}
                   onBlur={() => setEditTitle(false)}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") setEditTitle(false);
@@ -531,7 +581,10 @@ export function NoteEditor() {
             <div className="flex-1 overflow-auto px-4 pb-4 pt-1">
               <LiveEditor
                 content={content}
-                onChange={setContent}
+                onChange={(nextContent) => {
+                  contentDirtyRef.current = true;
+                  setContent(nextContent);
+                }}
                 onImageRemove={handleImageRemove}
                 onPasteCapture={handlePasteCapture}
               />

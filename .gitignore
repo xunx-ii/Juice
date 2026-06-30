@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 orange-notes/src-tauri/target
+orange-notes-server/target
 orange-notes/src-tauri/gen
 orange-notes/src-tauri/.tauri
 orange-notes/src-tauri/**/*.sqlite

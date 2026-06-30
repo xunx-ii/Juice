@@ -49,5 +49,4 @@ export type ServerMessage =
   | { type: "authentication_failed" }
   | { type: "push_ack"; version: number }
   | { type: "error"; message: string }
-  | { type: "state"; state: RemoteNotebookState; attachments: RemoteAttachmentMeta[] }
-  | { type: "server_done" };
+  | { type: "state"; state: RemoteNotebookState; attachments: RemoteAttachmentMeta[] };

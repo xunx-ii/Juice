@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
-import type { RemoteFolder, RemoteNote, RemoteNotebookState, RemoteAttachmentMeta } from "./protocol";
+import type { RemoteNotebookState, RemoteAttachmentMeta } from "./protocol";
 import { syncClient, SyncClient } from "./client";
 import { useNoteStore } from "../store/useNoteStore";
 
@@ -28,12 +28,18 @@ function httpBaseFromSyncAddress(address: string): string {
   return httpBase.replace(/\/$/, "");
 }
 
+function syncAuthHeaders(settings: SyncSettings): HeadersInit {
+  return {
+    "x-orange-notes-user": settings.username,
+    "x-orange-notes-password": settings.password,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Sync scheduler – coalesces rapid mutations (typing, drag, …) into a single
 // network round-trip so we don't hammer the server on every keystroke.
 // ---------------------------------------------------------------------------
 let scheduleTimer: ReturnType<typeof setTimeout> | null = null;
-let scheduleImmediate = false; // when true, sync on next tick (discrete op)
 
 function scheduleSync() {
   if (scheduleTimer) clearTimeout(scheduleTimer);
@@ -174,7 +180,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   /// Upload all images referenced in the current local notes to the server.
   syncImages: async () => {
     const { settings } = get();
-    if (!settings.address || !settings.username) return;
+    if (!settings.address || !settings.username || !settings.password) return;
 
     const notes = useNoteStore.getState().notes;
     const httpBase = httpBaseFromSyncAddress(settings.address);
@@ -198,7 +204,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
 
         await fetch(
           `${httpBase}/api/sync/files/${encodeURIComponent(settings.username)}/${encodeURIComponent(fileName)}`,
-          { method: "POST", body }
+          { method: "POST", headers: syncAuthHeaders(settings), body }
         );
       } catch {
         // Image might not exist locally yet — skip.
@@ -209,13 +215,13 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   /// Download a single image from the server and save it locally.
   downloadImage: async (fileName: string, mime: string) => {
     const { settings } = get();
-    if (!settings.address || !settings.username) return;
+    if (!settings.address || !settings.username || !settings.password) return;
 
     const httpBase = httpBaseFromSyncAddress(settings.address);
     const url = `${httpBase}/api/sync/files/${encodeURIComponent(settings.username)}/${encodeURIComponent(fileName)}`;
 
     try {
-      const r = await fetch(url);
+      const r = await fetch(url, { headers: syncAuthHeaders(settings) });
       if (!r.ok) return;
       const blob = await r.blob();
       const arrayBuf = await blob.arrayBuffer();
@@ -230,7 +236,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   /// Download any images that the server has but we don't have locally.
   downloadNewImages: async (attachments: RemoteAttachmentMeta[]) => {
     const { settings } = get();
-    if (!settings.address || !settings.username || attachments.length === 0) return;
+    if (!settings.address || !settings.username || !settings.password || attachments.length === 0) return;
 
     for (const att of attachments) {
       try {
@@ -287,6 +293,6 @@ syncClient.addListener((connected, error) => {
   });
 });
 
-syncClient.addStateHandler((state) => {
+syncClient.addStateHandler(() => {
   useSyncStore.getState().setState({ lastSync: Date.now() });
 });

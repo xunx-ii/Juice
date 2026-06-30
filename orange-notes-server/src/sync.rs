@@ -95,9 +95,6 @@ enum ServerMessage {
         state: NotebookState,
         attachments: Vec<AttachmentMeta>,
     },
-    /// Sent when an authenticated user pushes new changes; other sessions
-    /// of the same user receive this so they can load the latest state.
-    ServerDone,
 }
 
 pub async fn ws_handler(
@@ -130,15 +127,20 @@ async fn handle_socket(mut socket: WebSocket, username: String, db: Arc<Database
                 match serde_json::from_str::<ClientMessage>(&text) {
                     Ok(client_message) => {
                         match client_message {
-                            ClientMessage::Authenticate { username, password } => {
+                            ClientMessage::Authenticate { username: auth_username, password } => {
+                                if auth_username != username {
+                                    let _ = send(&mut socket, &ServerMessage::AuthenticationFailed).await;
+                                    continue;
+                                }
+
                                 // Only authenticate existing users — no auto-registration.
-                                match db.get_user_password_hash(username.clone()).await {
+                                match db.get_user_password_hash(auth_username.clone()).await {
                                     Ok(Some(hash)) => {
                                         if auth::verify_password(&password, hash.as_str()) {
                                             auth_success = true;
-                                            authenticated_user = Some(username.clone());
+                                            authenticated_user = Some(auth_username.clone());
                                             clients.add(session_id.clone(), ClientInfo {
-                                                username: username.clone(),
+                                                username: auth_username.clone(),
                                                 connected_at: chrono::Utc::now().to_rfc3339(),
                                             }).await;
                                             let _ = send(&mut socket, &ServerMessage::Authenticated).await;
@@ -149,7 +151,7 @@ async fn handle_socket(mut socket: WebSocket, username: String, db: Arc<Database
                                     Ok(None) => {
                                         // User does not exist — reject with a clear message.
                                         let _ = send(&mut socket, &ServerMessage::Error {
-                                            message: format!("用户 '{}' 不存在，请先在管理后台注册", username),
+                                            message: format!("用户 '{}' 不存在，请先在管理后台注册", auth_username),
                                         }).await;
                                     }
                                     Err(e) => {

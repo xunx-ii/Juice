@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
+use std::collections::HashSet;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -272,8 +273,39 @@ impl Database {
         self.conn(move |conn| {
             match entity_type.as_str() {
                 "folder" => {
-                    conn.execute("DELETE FROM notes WHERE folder = ?1 AND user_id = ?2", params![id, user_id.clone()])?;
-                    conn.execute("DELETE FROM folders WHERE id = ?1 AND user_id = ?2", params![id, user_id.clone()])?;
+                    let mut folder_ids = Vec::new();
+                    let mut folder_queue = vec![id.clone()];
+                    let mut seen_folder_ids = HashSet::new();
+                    while let Some(parent_id) = folder_queue.pop() {
+                        if !seen_folder_ids.insert(parent_id.clone()) {
+                            continue;
+                        }
+                        folder_ids.push(parent_id.clone());
+
+                        let child_ids = {
+                            let mut stmt = conn.prepare(
+                                "SELECT id FROM folders WHERE parent_id = ?1 AND user_id = ?2",
+                            )?;
+                            let rows = stmt
+                                .query_map(params![parent_id, user_id.clone()], |row| {
+                                    row.get::<_, String>(0)
+                                })?
+                                .collect::<Result<Vec<_>, _>>()?;
+                            rows
+                        };
+                        folder_queue.extend(child_ids);
+                    }
+
+                    for folder_id in folder_ids.iter().rev() {
+                        conn.execute(
+                            "DELETE FROM notes WHERE folder = ?1 AND user_id = ?2",
+                            params![folder_id, user_id.clone()],
+                        )?;
+                        conn.execute(
+                            "DELETE FROM folders WHERE id = ?1 AND user_id = ?2",
+                            params![folder_id, user_id.clone()],
+                        )?;
+                    }
                 }
                 "note" => {
                     conn.execute("DELETE FROM notes WHERE id = ?1 AND user_id = ?2", params![id, user_id.clone()])?;
@@ -405,7 +437,7 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           id TEXT NOT NULL,
           deleted_at INTEGER NOT NULL,
           user_id TEXT NOT NULL DEFAULT '',
-          PRIMARY KEY (entity_type, id)
+          PRIMARY KEY (user_id, entity_type, id)
         );
 
         CREATE TABLE IF NOT EXISTS attachments (
@@ -416,5 +448,48 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           updated_at INTEGER NOT NULL,
           PRIMARY KEY (user_id, file_name)
         );
-    ")
+    ")?;
+
+    migrate_deleted_log_primary_key(conn)?;
+    Ok(())
+}
+
+fn migrate_deleted_log_primary_key(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let mut columns = Vec::new();
+    {
+        let mut stmt = conn.prepare("PRAGMA table_info(deleted_log)")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+        })?;
+        for row in rows {
+            columns.push(row?);
+        }
+    }
+
+    let has_user_id_in_pk = columns
+        .iter()
+        .any(|(name, primary_key_order)| name == "user_id" && *primary_key_order > 0);
+    if has_user_id_in_pk {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS deleted_log_next (
+          entity_type TEXT NOT NULL,
+          id TEXT NOT NULL,
+          deleted_at INTEGER NOT NULL,
+          user_id TEXT NOT NULL DEFAULT '',
+          PRIMARY KEY (user_id, entity_type, id)
+        );
+
+        INSERT OR REPLACE INTO deleted_log_next (entity_type, id, deleted_at, user_id)
+        SELECT entity_type, id, deleted_at, user_id FROM deleted_log;
+
+        DROP TABLE deleted_log;
+        ALTER TABLE deleted_log_next RENAME TO deleted_log;
+        ",
+    )?;
+
+    Ok(())
 }

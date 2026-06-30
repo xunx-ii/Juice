@@ -1,4 +1,4 @@
-import { Plus, FolderPlus, Settings, Check, Loader2, Save, RefreshCw } from "lucide-react";
+import { Plus, FolderPlus, Settings, Check, Loader2, Save, RefreshCw, Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SearchBar } from "@/components/SearchBar";
 import { TreeView } from "@/components/TreeView";
@@ -8,7 +8,6 @@ import { useState } from "react";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -174,12 +173,12 @@ function SyncSettingsSection() {
       </div>
 
       {lastError && (
-        <div className="text-xs text-destructive">❌ {lastError}</div>
+        <div className="text-xs text-destructive">{lastError}</div>
       )}
 
       {!lastError && lastSync && (
         <div className="text-xs text-muted-foreground">
-          ✓ {formatLastSync(lastSync)}
+          {formatLastSync(lastSync)}
         </div>
       )}
 
@@ -194,7 +193,6 @@ function SyncSettingsSection() {
 
       {showRegister && (
         <div className="space-y-2 pt-2 border-t border-border/50">
-          <div className="text-xs text-muted-foreground">注册新账号（将同步到服务器）</div>
           <Input
             value={regUsername}
             onChange={(e) => setRegUsername(e.target.value)}
@@ -222,7 +220,7 @@ function SyncSettingsSection() {
               regStatus === "ok" ? "text-emerald-500" :
               regStatus === "fail" ? "text-destructive" : "text-muted-foreground"
             }`}>
-              {regStatus === "ok" ? "✓ " : regStatus === "fail" ? "❌ " : ""}{regMessage}
+              {regMessage}
             </div>
           )}
         </div>
@@ -246,7 +244,6 @@ function SettingsDialog({
       <DialogContent className="sm:max-w-[420px] max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>设置</DialogTitle>
-          <DialogDescription>应用偏好设置和同步状态</DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-2">
           {/* Theme */}
@@ -259,21 +256,20 @@ function SettingsDialog({
               variant="outline"
               size="sm"
               onClick={toggleDarkMode}
-              className="min-w-[80px]"
+              className="min-w-[80px] gap-1.5"
             >
-              {darkMode ? "🌙 深色" : "☀️ 浅色"}
+              {darkMode ? (
+                <Moon className="h-3.5 w-3.5" />
+              ) : (
+                <Sun className="h-3.5 w-3.5" />
+              )}
+              {darkMode ? "深色" : "浅色"}
             </Button>
           </div>
           <Separator />
 
           {/* Sync Settings */}
           <SyncSettingsSection />
-
-          {/* About */}
-          <div className="text-xs text-muted-foreground">
-            <p>桔子笔记 v1.0.0</p>
-            <p>基于 React + shadcn/ui 构建</p>
-          </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
@@ -288,7 +284,6 @@ function SettingsDialog({
 export function Sidebar() {
   const createNote = useNoteStore((s) => s.createNote);
   const addFolder = useNoteStore((s) => s.addFolder);
-  const folders = useNoteStore((s) => s.folders);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const syncConnected = useSyncStore((s) => s.authenticated);

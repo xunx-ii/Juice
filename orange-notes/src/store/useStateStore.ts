@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import { useNoteStore } from "@/store/useNoteStore";
 
 interface UIState {
   /** Currently selected row — may be a note (default) or folder. */

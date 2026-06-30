@@ -506,29 +506,29 @@ export function TreeView() {
       const pos = computeDropPos(clientY, targetId);
 
       if (dragged.type === "folder") {
-        const targetFolder = folders.find((f) => f.id === targetId);
-        if (!targetFolder) return;
-
         if (pos === "inside" && targetType === "folder") {
           const childCount = folders.filter((f) => f.parentId === targetId).length;
           void moveFolderTo(dragged.id, targetId, childCount);
           return;
         }
 
-        const targetParentId = targetFolder.parentId;
-        const insertIdx =
+        const targetParentId =
           targetType === "folder"
-            ? (() => {
-                const siblings = folders
-                  .filter((f) => f.parentId === targetParentId)
-                  .sort((a, b) => a.sortOrder - b.sortOrder);
-                const i = siblings.findIndex((f) => f.id === targetId);
-                return pos === "before" ? i : i + 1;
-              })()
-            : (() => {
-                const siblings = folders.filter((f) => f.parentId === targetParentId).sort((a, b) => a.sortOrder - b.sortOrder);
-                return pos === "before" ? 0 : siblings.length;
-              })();
+            ? folders.find((f) => f.id === targetId)?.parentId ?? null
+            : target.parentFolderId ?? null;
+        const siblings = folders
+          .filter((f) => f.parentId === targetParentId)
+          .sort((a, b) => a.sortOrder - b.sortOrder);
+        const targetFolderIndex =
+          targetType === "folder"
+            ? siblings.findIndex((f) => f.id === targetId)
+            : siblings.length;
+        const insertIdx =
+          targetFolderIndex >= 0 && targetType === "folder"
+            ? pos === "before"
+              ? targetFolderIndex
+              : targetFolderIndex + 1
+            : siblings.length;
         void moveFolderTo(dragged.id, targetParentId, Math.max(0, insertIdx));
         return;
       }

@@ -242,13 +242,22 @@ fn apply_remote_notebook(
     let mut conn = state.db.lock().expect("database mutex poisoned");
     let tx = conn.transaction()?;
 
-    tx.execute("DELETE FROM folders", [])?;
     tx.execute("DELETE FROM notes", [])?;
+    tx.execute("DELETE FROM folders", [])?;
 
-    let deleted_ids: HashSet<String> = remote_deleted.iter().map(|d| d.id.clone()).collect();
+    let deleted_folders: HashSet<String> = remote_deleted
+        .iter()
+        .filter(|d| d.entity_type == "folder")
+        .map(|d| d.id.clone())
+        .collect();
+    let deleted_notes: HashSet<String> = remote_deleted
+        .iter()
+        .filter(|d| d.entity_type == "note")
+        .map(|d| d.id.clone())
+        .collect();
 
     for f in &remote_folders {
-        if deleted_ids.contains(&f.id) {
+        if deleted_folders.contains(&f.id) {
             continue;
         }
         tx.execute(
@@ -258,7 +267,7 @@ fn apply_remote_notebook(
     }
 
     for n in &remote_notes {
-        if deleted_ids.contains(&n.id) {
+        if deleted_notes.contains(&n.id) || deleted_folders.contains(&n.folder) {
             continue;
         }
         tx.execute(
@@ -571,19 +580,44 @@ fn rename_folder(state: tauri::State<'_, AppState>, id: String, name: String) ->
 }
 
 #[tauri::command]
-fn delete_folder(state: tauri::State<'_, AppState>, id: String) -> Result<(), AppError> {
+fn delete_folder(state: tauri::State<'_, AppState>, id: String) -> Result<NotebookData, AppError> {
     let conn = state.db.lock().expect("database mutex poisoned");
-    let mut candidates = HashSet::new();
-    let mut stmt = conn.prepare("SELECT content FROM notes WHERE folder = $1")?;
-    let contents = stmt
-        .query_map(params![id], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    for content in contents {
-        candidates.extend(extract_image_file_names(&content));
+    let mut folder_ids = Vec::new();
+    let mut folder_queue = vec![id.clone()];
+    let mut seen_folder_ids = HashSet::new();
+    while let Some(parent_id) = folder_queue.pop() {
+        if !seen_folder_ids.insert(parent_id.clone()) {
+            continue;
+        }
+        folder_ids.push(parent_id.clone());
+
+        let child_ids = {
+            let mut stmt = conn.prepare("SELECT id FROM folders WHERE parent_id = $1")?;
+            let rows = stmt
+                .query_map(params![parent_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        folder_queue.extend(child_ids);
     }
-    conn.execute("DELETE FROM folders WHERE id = $1", params![id])?;
+
+    let mut candidates = HashSet::new();
+    for folder_id in &folder_ids {
+        let mut stmt = conn.prepare("SELECT content FROM notes WHERE folder = $1")?;
+        let contents = stmt
+            .query_map(params![folder_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for content in contents {
+            candidates.extend(extract_image_file_names(&content));
+        }
+    }
+
+    for folder_id in folder_ids.iter().rev() {
+        conn.execute("DELETE FROM notes WHERE folder = $1", params![folder_id])?;
+        conn.execute("DELETE FROM folders WHERE id = $1", params![folder_id])?;
+    }
     cleanup_unreferenced_images(&conn, &state.img_dir, candidates)?;
-    Ok(())
+    read_all(&conn)
 }
 
 /// Move a folder under a new parent (or to root when target_parent_id is null),

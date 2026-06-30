@@ -22,27 +22,19 @@ function App() {
   const initialize = useNoteStore((s) => s.initialize);
   const loading = useNoteStore((s) => s.loading);
   const error = useNoteStore((s) => s.error);
-  const { settings: syncSettings, pushState } = useSyncStore();
+  const startSync = useSyncStore((s) => s.startSync);
 
-  // Auto-sync every 30s when settings are complete. The pushState function
-  // now handles connection/auth automatically.
-  const pushStateRef = useRef(pushState);
+  // Auto-sync every 30s when settings are complete.
+  const startSyncRef = useRef(startSync);
   useEffect(() => {
-    pushStateRef.current = pushState;
-  }, [pushState]);
+    startSyncRef.current = startSync;
+  }, [startSync]);
 
   useEffect(() => {
-    const store = useNoteStore;
     const handler = async () => {
-      const { settings: s } = useSyncStore.getState();
-      if (!s.address || !s.username || !s.password) return;
-      try {
-        const payload = store.getState().getSyncPayload();
-        const result = await pushStateRef.current(payload);
-        await store.getState().applyRemoteChanges(result);
-      } catch {
-        // auto-sync failure is silent — will retry next interval.
-      }
+      const { settings: s, syncing } = useSyncStore.getState();
+      if (!s.address || !s.username || !s.password || syncing) return;
+      await startSyncRef.current();
     };
 
     const id = window.setInterval(handler, 30_000);
