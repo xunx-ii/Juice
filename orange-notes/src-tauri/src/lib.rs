@@ -8,6 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::Manager;
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -21,6 +22,8 @@ enum AppError {
     Path(String),
     #[error("invalid image data")]
     InvalidImageData,
+    #[error("clipboard error: {0}")]
+    Clipboard(String),
 }
 
 impl serde::Serialize for AppError {
@@ -937,8 +940,19 @@ fn save_synced_image(
     Ok(())
 }
 
+#[tauri::command]
+fn copy_text_to_clipboard(app: tauri::AppHandle, text: String) -> Result<(), AppError> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    app.clipboard()
+        .write_text(text)
+        .map_err(|error| AppError::Clipboard(error.to_string()))
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let db_path = data_dir(app)?.join("notes.sqlite");
             let conn = Connection::open(db_path)?;
@@ -969,7 +983,8 @@ pub fn run() {
             save_synced_image,
             apply_remote_notebook,
             set_sync_version,
-            set_sync_markers
+            set_sync_markers,
+            copy_text_to_clipboard
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

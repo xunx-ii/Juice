@@ -98,6 +98,20 @@
     max-width: 72ch;
   }
 
+  .note-preview,
+  .note-preview * {
+    -webkit-user-select: text !important;
+    user-select: text !important;
+  }
+
+  .note-preview img,
+  .note-preview svg,
+  .note-preview button,
+  .note-preview input[type="checkbox"] {
+    -webkit-user-select: none !important;
+    user-select: none !important;
+  }
+
   .note-prose p {
     margin-top: 0.75em;
     margin-bottom: 0.75em;

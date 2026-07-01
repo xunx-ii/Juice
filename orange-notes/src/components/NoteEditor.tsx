@@ -467,6 +467,36 @@ function PreviewContent({ content }: { content: string }) {
   );
 }
 
+function getPreviewSelectionText(container: HTMLElement | null) {
+  const selection = window.getSelection();
+  const anchorNode = selection?.anchorNode;
+  const focusNode = selection?.focusNode;
+  if (!container || !selection || selection.isCollapsed || !anchorNode || !focusNode) {
+    return "";
+  }
+  if (!container.contains(anchorNode) || !container.contains(focusNode)) {
+    return "";
+  }
+  return selection.toString();
+}
+
+async function writePreviewSelectionToClipboard(text: string) {
+  try {
+    await invoke("copy_text_to_clipboard", { text });
+    return true;
+  } catch (error) {
+    console.error("Failed to copy selected preview text", error);
+  }
+
+  try {
+    if (!navigator.clipboard?.writeText) return false;
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function NoteEditor() {
   const activeNoteId = useNoteStore((s) => s.activeNoteId);
   const notes = useNoteStore((s) => s.notes);
@@ -497,12 +527,52 @@ export function NoteEditor() {
   const skipNextTitleSaveRef = useRef(false);
   const pasteLockRef = useRef(false);
   const deleteInFlightRef = useRef(false);
+  const previewRef = useRef<HTMLDivElement>(null);
   const debouncedContent = useDebounce(content, 500);
   const debouncedTitle = useDebounce(title, 500);
 
   useEffect(() => {
     contentRef.current = content;
   }, [content]);
+
+  useEffect(() => {
+    const selectedPreviewText = () => getPreviewSelectionText(previewRef.current);
+
+    const handleCopy = (event: ClipboardEvent) => {
+      const text = selectedPreviewText();
+      if (!text.trim() || !event.clipboardData) return;
+      event.clipboardData.setData("text/plain", text);
+      event.preventDefault();
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.altKey ||
+        event.shiftKey ||
+        !(event.ctrlKey || event.metaKey) ||
+        event.key.toLowerCase() !== "c"
+      ) {
+        return;
+      }
+
+      const text = selectedPreviewText();
+      if (!text.trim()) return;
+
+      event.preventDefault();
+      void writePreviewSelectionToClipboard(text).then((copied) => {
+        if (copied) return;
+        document.execCommand("copy");
+      });
+    };
+
+    document.addEventListener("copy", handleCopy);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("copy", handleCopy);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
 
   useEffect(() => {
     if (
@@ -863,11 +933,11 @@ export function NoteEditor() {
 
         <TabsContent value="preview" className="flex-1 p-0 m-0 min-h-0 overflow-auto fade-in">
           <div className="px-8 pt-6 pb-4 w-full">
-            <div className="max-w-[72ch] mx-auto">
+            <div ref={previewRef} className="note-preview max-w-[72ch] mx-auto">
               <h1 className="text-[1.7rem] font-bold tracking-tight leading-tight text-foreground pb-2">
                 {activeNote.title || "未命名笔记"}
               </h1>
-              <div className="note-prose select-text">
+              <div className="note-prose">
                 <PreviewContent content={content} />
               </div>
             </div>
