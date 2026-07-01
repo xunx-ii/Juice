@@ -800,8 +800,6 @@ export function NoteEditor() {
     previewSelectionTextRef.current = "";
     setPreviewSelectionRects([]);
     window.getSelection()?.removeAllRanges();
-    event.preventDefault();
-    event.stopPropagation();
   }, [clearPreviewSelection]);
 
   const handlePreviewKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -841,8 +839,17 @@ export function NoteEditor() {
       drag.moved ||= Math.hypot(deltaX, deltaY) > 2;
       if (!drag.moved) return;
 
-      event.preventDefault();
-      updatePreviewSelection(drag.startRange, focusRange);
+      const startRange = drag.startRange.cloneRange();
+      const endRange = focusRange.cloneRange();
+      window.requestAnimationFrame(() => {
+        const nativeText = getPreviewSelectionText(container);
+        if (nativeText.trim()) {
+          previewSelectionTextRef.current = nativeText;
+          setPreviewSelectionRects([]);
+          return;
+        }
+        updatePreviewSelection(startRange, endRange);
+      });
     };
 
     const stopPreviewSelectionDrag = (event: PointerEvent | MouseEvent) => {
