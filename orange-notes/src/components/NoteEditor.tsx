@@ -503,6 +503,10 @@ function getPreviewSelectionText(container: HTMLElement | null) {
   return selection.toString();
 }
 
+function getPreviewContentRoot(container: HTMLElement) {
+  return container.querySelector<HTMLElement>("[data-preview-content]") ?? container;
+}
+
 function isPreviewTextSelectionTarget(target: EventTarget | null) {
   if (!(target instanceof Node)) return false;
   const element = target instanceof Element ? target : target.parentElement;
@@ -513,19 +517,123 @@ function isPreviewTextSelectionTarget(target: EventTarget | null) {
   );
 }
 
+function distanceToRect(rect: DOMRect, x: number, y: number) {
+  const dx = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
+  const dy = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
+  return Math.hypot(dx, dy);
+}
+
+function verticalDistanceToRect(rect: DOMRect, y: number) {
+  if (y < rect.top) return rect.top - y;
+  if (y > rect.bottom) return y - rect.bottom;
+  return 0;
+}
+
+function rectsShareLine(a: DOMRect, b: DOMRect) {
+  const overlap = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+  return overlap > 0 || Math.abs((a.top + a.bottom) / 2 - (b.top + b.bottom) / 2) < 3;
+}
+
+function selectablePreviewTextNode(node: Node) {
+  if (node.nodeType !== Node.TEXT_NODE) return false;
+  const text = node.textContent ?? "";
+  if (!/\S/.test(text)) return false;
+
+  const parent = node.parentElement;
+  if (!parent) return false;
+  return !parent.closest(
+    ".preview-selection-layer,button,input,textarea,select,[contenteditable='true'],[contenteditable=''],img,svg"
+  );
+}
+
+function textOffsetFromPointOnLine(node: Text, lineRect: DOMRect, x: number, y: number) {
+  const text = node.data;
+  const range = document.createRange();
+  let bestOffset = 0;
+  let bestScore = Number.POSITIVE_INFINITY;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "\n" || char === "\r") continue;
+
+    range.setStart(node, index);
+    range.setEnd(node, index + 1);
+
+    for (const rect of Array.from(range.getClientRects())) {
+      if (rect.width === 0 && rect.height === 0) continue;
+      if (!rectsShareLine(rect, lineRect)) continue;
+
+      const offset = x <= rect.left + rect.width / 2 ? index : index + 1;
+      const horizontalDistance = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
+      const score = verticalDistanceToRect(rect, y) * 1000 + horizontalDistance;
+      if (score < bestScore) {
+        bestScore = score;
+        bestOffset = offset;
+      }
+    }
+  }
+
+  return bestOffset;
+}
+
+function fallbackPreviewCaretRangeFromPoint(
+  container: HTMLElement,
+  x: number,
+  y: number
+): Range | null {
+  const root = getPreviewContentRoot(container);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) =>
+      selectablePreviewTextNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT,
+  });
+
+  let best:
+    | {
+        node: Text;
+        rect: DOMRect;
+        score: number;
+      }
+    | null = null;
+
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text;
+    const nodeRange = document.createRange();
+    nodeRange.selectNodeContents(node);
+
+    for (const rect of Array.from(nodeRange.getClientRects())) {
+      if (rect.width === 0 && rect.height === 0) continue;
+      const score = distanceToRect(rect, x, y);
+      if (!best || score < best.score) {
+        best = { node, rect, score };
+      }
+    }
+  }
+
+  if (!best) return null;
+
+  const range = document.createRange();
+  const offset = textOffsetFromPointOnLine(best.node, best.rect, x, y);
+  range.setStart(best.node, offset);
+  range.collapse(true);
+  return range;
+}
+
 function previewCaretRangeFromPoint(
   container: HTMLElement,
   x: number,
   y: number
 ): Range | null {
+  const root = getPreviewContentRoot(container);
   const doc = document as DocumentWithCaretPosition;
   const range = doc.caretRangeFromPoint?.(x, y);
   if (range) {
-    return container.contains(range.startContainer) ? range : null;
+    return root.contains(range.startContainer) ? range : fallbackPreviewCaretRangeFromPoint(container, x, y);
   }
 
   const position = doc.caretPositionFromPoint?.(x, y);
-  if (!position || !container.contains(position.offsetNode)) return null;
+  if (!position || !root.contains(position.offsetNode)) {
+    return fallbackPreviewCaretRangeFromPoint(container, x, y);
+  }
 
   const fallbackRange = document.createRange();
   fallbackRange.setStart(position.offsetNode, position.offset);
@@ -664,7 +772,6 @@ export function NoteEditor() {
   const handlePreviewPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     if (
       event.button !== 0 ||
-      event.pointerType === "touch" ||
       event.altKey ||
       event.ctrlKey ||
       event.metaKey ||
@@ -693,7 +800,6 @@ export function NoteEditor() {
     previewSelectionTextRef.current = "";
     setPreviewSelectionRects([]);
     window.getSelection()?.removeAllRanges();
-    event.currentTarget.setPointerCapture?.(event.pointerId);
     event.preventDefault();
     event.stopPropagation();
   }, [clearPreviewSelection]);
@@ -721,10 +827,11 @@ export function NoteEditor() {
   }, [clearPreviewSelection]);
 
   useEffect(() => {
-    const handlePointerMove = (event: PointerEvent) => {
+    const handlePointerMove = (event: PointerEvent | MouseEvent) => {
       const drag = previewSelectionDragRef.current;
       const container = previewRef.current;
-      if (!drag || !container || drag.pointerId !== event.pointerId) return;
+      if (!drag || !container) return;
+      if ("pointerId" in event && drag.pointerId !== event.pointerId) return;
 
       const focusRange = previewCaretRangeFromPoint(container, event.clientX, event.clientY);
       if (!focusRange) return;
@@ -738,12 +845,14 @@ export function NoteEditor() {
       updatePreviewSelection(drag.startRange, focusRange);
     };
 
-    const stopPreviewSelectionDrag = (event: PointerEvent) => {
+    const stopPreviewSelectionDrag = (event: PointerEvent | MouseEvent) => {
       const drag = previewSelectionDragRef.current;
-      if (!drag || drag.pointerId !== event.pointerId) return;
-      const container = previewRef.current;
-      if (container?.hasPointerCapture?.(event.pointerId)) {
-        container.releasePointerCapture(event.pointerId);
+      if (!drag) return;
+      if ("pointerId" in event && drag.pointerId !== event.pointerId) return;
+      if (!drag.moved) {
+        previewSelectionTextRef.current = "";
+        setPreviewSelectionRects([]);
+        window.getSelection()?.removeAllRanges();
       }
       previewSelectionDragRef.current = null;
     };
@@ -751,10 +860,14 @@ export function NoteEditor() {
     document.addEventListener("pointermove", handlePointerMove, true);
     document.addEventListener("pointerup", stopPreviewSelectionDrag, true);
     document.addEventListener("pointercancel", stopPreviewSelectionDrag, true);
+    document.addEventListener("mousemove", handlePointerMove, true);
+    document.addEventListener("mouseup", stopPreviewSelectionDrag, true);
     return () => {
       document.removeEventListener("pointermove", handlePointerMove, true);
       document.removeEventListener("pointerup", stopPreviewSelectionDrag, true);
       document.removeEventListener("pointercancel", stopPreviewSelectionDrag, true);
+      document.removeEventListener("mousemove", handlePointerMove, true);
+      document.removeEventListener("mouseup", stopPreviewSelectionDrag, true);
     };
   }, [updatePreviewSelection]);
 
@@ -1164,7 +1277,7 @@ export function NoteEditor() {
               tabIndex={0}
               onDragStart={(event) => event.preventDefault()}
               onKeyDown={handlePreviewKeyDown}
-              onPointerDown={handlePreviewPointerDown}
+              onPointerDownCapture={handlePreviewPointerDown}
             >
               <div className="preview-selection-layer" aria-hidden="true">
                 {previewSelectionRects.map((rect, index) => (

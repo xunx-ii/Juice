@@ -110,13 +110,13 @@
     inset: 0;
     overflow: hidden;
     pointer-events: none;
-    z-index: 0;
+    z-index: 2;
   }
 
   .preview-selection-rect {
     position: absolute;
     border-radius: 2px;
-    background: hsl(var(--primary) / 0.24);
+    background: hsl(var(--primary) / 0.28);
   }
 
   .preview-content {
