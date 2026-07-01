@@ -74,23 +74,25 @@ interface ImagePayload {
   bytes: number[];
 }
 
-interface PreviewSelectionDrag {
-  pointerId: number;
-  startRange: Range;
-  startX: number;
-  startY: number;
-  moved: boolean;
-}
-
-type DocumentWithCaretPosition = Document & {
-  caretRangeFromPoint?: (x: number, y: number) => Range | null;
-  caretPositionFromPoint?: (
-    x: number,
-    y: number
-  ) => { offsetNode: Node; offset: number } | null;
-};
-
 const imageUrlCache = new Map<string, string>();
+const PREVIEW_ALLOWED_SHORTCUTS = new Set(["a", "c"]);
+const PREVIEW_READONLY_KEYS = new Set([
+  "Backspace",
+  "Delete",
+  "Enter",
+  "Tab",
+]);
+const PREVIEW_NAVIGATION_KEYS = new Set([
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "End",
+  "Escape",
+  "Home",
+  "PageDown",
+  "PageUp",
+]);
 
 function revokeCachedImage(fileName: string) {
   const url = imageUrlCache.get(fileName);
@@ -496,60 +498,6 @@ function getPreviewSelectionText(container: HTMLElement | null) {
   return selection.toString();
 }
 
-function isPreviewTextSelectionTarget(target: EventTarget | null) {
-  if (!(target instanceof Node)) return false;
-  const element = target instanceof Element ? target : target.parentElement;
-  if (!element) return false;
-
-  return !element.closest(
-    "button,input,textarea,select,[contenteditable='true'],[contenteditable=''],img,svg"
-  );
-}
-
-function previewCaretRangeFromPoint(
-  container: HTMLElement,
-  x: number,
-  y: number
-): Range | null {
-  const doc = document as DocumentWithCaretPosition;
-  const range = doc.caretRangeFromPoint?.(x, y);
-  if (range) {
-    return container.contains(range.startContainer) ? range : null;
-  }
-
-  const position = doc.caretPositionFromPoint?.(x, y);
-  if (!position || !container.contains(position.offsetNode)) return null;
-
-  const fallbackRange = document.createRange();
-  fallbackRange.setStart(position.offsetNode, position.offset);
-  fallbackRange.collapse(true);
-  return fallbackRange;
-}
-
-function setPreviewSelection(container: HTMLElement, startRange: Range, focusRange: Range) {
-  if (
-    !container.contains(startRange.startContainer) ||
-    !container.contains(focusRange.startContainer)
-  ) {
-    return;
-  }
-
-  const selection = window.getSelection();
-  if (!selection) return;
-
-  const range = document.createRange();
-  if (startRange.compareBoundaryPoints(Range.START_TO_START, focusRange) <= 0) {
-    range.setStart(startRange.startContainer, startRange.startOffset);
-    range.setEnd(focusRange.startContainer, focusRange.startOffset);
-  } else {
-    range.setStart(focusRange.startContainer, focusRange.startOffset);
-    range.setEnd(startRange.startContainer, startRange.startOffset);
-  }
-
-  selection.removeAllRanges();
-  selection.addRange(range);
-}
-
 async function writePreviewSelectionToClipboard(text: string) {
   try {
     await invoke("copy_text_to_clipboard", { text });
@@ -598,7 +546,6 @@ export function NoteEditor() {
   const pasteLockRef = useRef(false);
   const deleteInFlightRef = useRef(false);
   const previewRef = useRef<HTMLDivElement>(null);
-  const previewSelectionDragRef = useRef<PreviewSelectionDrag | null>(null);
   const debouncedContent = useDebounce(content, 500);
   const debouncedTitle = useDebounce(title, 500);
 
@@ -606,74 +553,29 @@ export function NoteEditor() {
     contentRef.current = content;
   }, [content]);
 
-  const handlePreviewPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    if (
-      event.button !== 0 ||
-      event.pointerType === "touch" ||
-      event.altKey ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.shiftKey ||
-      !isPreviewTextSelectionTarget(event.target)
-    ) {
-      return;
-    }
-
-    const container = previewRef.current;
-    if (!container) return;
-
-    const startRange = previewCaretRangeFromPoint(container, event.clientX, event.clientY);
-    if (!startRange) return;
-
-    previewSelectionDragRef.current = {
-      pointerId: event.pointerId,
-      startRange: startRange.cloneRange(),
-      startX: event.clientX,
-      startY: event.clientY,
-      moved: false,
-    };
-
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    window.getSelection()?.removeAllRanges();
-    event.stopPropagation();
+  const handlePreviewBeforeInput = useCallback((event: React.FormEvent<HTMLDivElement>) => {
+    event.preventDefault();
   }, []);
 
-  useEffect(() => {
-    const handlePointerMove = (event: PointerEvent) => {
-      const drag = previewSelectionDragRef.current;
-      const container = previewRef.current;
-      if (!drag || !container || drag.pointerId !== event.pointerId) return;
+  const handlePreviewPaste = useCallback((event: React.ClipboardEvent<HTMLDivElement>) => {
+    event.preventDefault();
+  }, []);
 
-      const focusRange = previewCaretRangeFromPoint(container, event.clientX, event.clientY);
-      if (!focusRange) return;
+  const handlePreviewDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+  }, []);
 
-      const deltaX = event.clientX - drag.startX;
-      const deltaY = event.clientY - drag.startY;
-      drag.moved ||= Math.hypot(deltaX, deltaY) > 2;
-      if (!drag.moved) return;
+  const handlePreviewKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    const key = event.key;
+    const shortcutKey = key.toLowerCase();
+    const hasCommandModifier = event.ctrlKey || event.metaKey;
 
+    if (hasCommandModifier && PREVIEW_ALLOWED_SHORTCUTS.has(shortcutKey)) return;
+    if (PREVIEW_NAVIGATION_KEYS.has(key)) return;
+
+    if (PREVIEW_READONLY_KEYS.has(key) || key.length === 1 || hasCommandModifier) {
       event.preventDefault();
-      setPreviewSelection(container, drag.startRange, focusRange);
-    };
-
-    const stopPreviewSelectionDrag = (event: PointerEvent) => {
-      const drag = previewSelectionDragRef.current;
-      if (!drag || drag.pointerId !== event.pointerId) return;
-      const container = previewRef.current;
-      if (container?.hasPointerCapture?.(event.pointerId)) {
-        container.releasePointerCapture(event.pointerId);
-      }
-      previewSelectionDragRef.current = null;
-    };
-
-    document.addEventListener("pointermove", handlePointerMove, true);
-    document.addEventListener("pointerup", stopPreviewSelectionDrag, true);
-    document.addEventListener("pointercancel", stopPreviewSelectionDrag, true);
-    return () => {
-      document.removeEventListener("pointermove", handlePointerMove, true);
-      document.removeEventListener("pointerup", stopPreviewSelectionDrag, true);
-      document.removeEventListener("pointercancel", stopPreviewSelectionDrag, true);
-    };
+    }
   }, []);
 
   useEffect(() => {
@@ -1077,9 +979,18 @@ export function NoteEditor() {
             <div
               ref={previewRef}
               className="note-preview max-w-[72ch] mx-auto"
+              contentEditable
+              suppressContentEditableWarning
+              aria-readonly="true"
+              inputMode="none"
+              role="document"
+              spellCheck={false}
               tabIndex={0}
-              onPointerDownCapture={handlePreviewPointerDown}
+              onBeforeInput={handlePreviewBeforeInput}
               onDragStart={(event) => event.preventDefault()}
+              onDrop={handlePreviewDrop}
+              onKeyDown={handlePreviewKeyDown}
+              onPaste={handlePreviewPaste}
             >
               <h1 className="text-[1.7rem] font-bold tracking-tight leading-tight text-foreground pb-2">
                 {activeNote.title || "未命名笔记"}
