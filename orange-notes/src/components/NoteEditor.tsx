@@ -7,6 +7,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Markdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import {
   Eye,
@@ -58,6 +59,7 @@ import { cn } from "@/lib/utils";
 const IMAGE_TOKEN_RE = /!\[\[([^\]\r\n]+)\]\]/g;
 const EMPTY_EDITOR_MIN_HEIGHT = 96;
 const TEXT_SEGMENT_MIN_HEIGHT = 28;
+const MARKDOWN_PLUGINS = [remarkGfm, remarkBreaks];
 
 type Segment =
   | { type: "text"; value: string }
@@ -447,7 +449,7 @@ function LiveEditor({
 function PreviewContent({ content }: { content: string }) {
   const segments = useMemo(() => splitSegments(content), [content]);
   if (segments.length === 0) {
-    return <Markdown remarkPlugins={[remarkGfm]}>*空白笔记*</Markdown>;
+    return <Markdown remarkPlugins={MARKDOWN_PLUGINS}>*空白笔记*</Markdown>;
   }
 
   return (
@@ -456,7 +458,7 @@ function PreviewContent({ content }: { content: string }) {
         segment.type === "image" ? (
           <NoteImage key={`${segment.fileName}-${index}`} fileName={segment.fileName} />
         ) : (
-          <Markdown key={`text-${index}`} remarkPlugins={[remarkGfm]}>
+          <Markdown key={`text-${index}`} remarkPlugins={MARKDOWN_PLUGINS}>
             {segment.value}
           </Markdown>
         )
@@ -865,7 +867,7 @@ export function NoteEditor() {
               <h1 className="text-[1.7rem] font-bold tracking-tight leading-tight text-foreground pb-2">
                 {activeNote.title || "未命名笔记"}
               </h1>
-              <div className="note-prose">
+              <div className="note-prose select-text">
                 <PreviewContent content={content} />
               </div>
             </div>
