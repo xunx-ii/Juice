@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -10,6 +16,12 @@ import {
   MoreHorizontal,
   Folders,
   Clock,
+  Star,
+  CalendarDays,
+  PanelLeft,
+  PanelRight,
+  Moon,
+  Sun,
 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -31,11 +43,17 @@ import {
 import { useNoteStore } from "@/store/useNoteStore";
 import { useDebounce } from "@/hooks/useDebounce";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
   NOTE_IMAGE_AVAILABLE_EVENT,
   NOTE_IMAGE_DELETED_EVENT,
   noteImageAvailableFileName,
   noteImageDeletedFileName,
 } from "@/lib/noteImageEvents";
+import { cn } from "@/lib/utils";
 
 const IMAGE_TOKEN_RE = /!\[\[([^\]\r\n]+)\]\]/g;
 const EMPTY_EDITOR_MIN_HEIGHT = 96;
@@ -193,7 +211,10 @@ function NoteImage({
   return (
     <div
       ref={ref}
-      className="not-prose my-1 inline-flex min-h-12 min-w-16 max-w-full items-center justify-center overflow-hidden rounded border bg-muted/20 align-top"
+      className={cn(
+        "not-prose my-1 inline-flex min-h-14 min-w-20 max-w-full items-center justify-center overflow-hidden rounded-lg border border-border/50 bg-muted/20 align-top",
+        "shadow-sm transition-shadow duration-200 hover:shadow-md"
+      )}
     >
       {src ? (
         <img
@@ -207,7 +228,108 @@ function NoteImage({
               : "m-0 block max-h-[560px] max-w-full object-contain"
           }
         />
-      ) : null}
+      ) : (
+        <div className="flex flex-col items-center gap-1 px-4 py-3 text-muted-foreground/50">
+          <div className="h-6 w-6 animate-pulse rounded bg-muted-foreground/20" />
+          <span className="text-[10px] tracking-wide">加载中…</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UnifiedTopBar({
+  sidebarOpen,
+  toggleSidebar,
+  darkMode,
+  toggleDarkMode,
+  noteInfo,
+  actions,
+}: {
+  sidebarOpen: boolean;
+  toggleSidebar: () => void;
+  darkMode: boolean;
+  toggleDarkMode: () => void;
+  noteInfo?: React.ReactNode;
+  actions?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between px-3 h-10 border-b border-border/50 shrink-0 bg-muted/20 backdrop-blur-sm">
+      {/* Left: app controls */}
+      <div className="flex items-center gap-0.5">
+        <Tooltip delayDuration={300}>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 rounded-md"
+              onClick={toggleSidebar}
+            >
+              {sidebarOpen ? (
+                <PanelLeft className="h-3.5 w-3.5" />
+              ) : (
+                <PanelRight className="h-3.5 w-3.5" />
+              )}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="text-xs">
+            {sidebarOpen ? "收起侧边栏" : "展开侧边栏"}
+          </TooltipContent>
+        </Tooltip>
+        <Tooltip delayDuration={300}>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 rounded-md"
+              onClick={toggleDarkMode}
+            >
+              {darkMode ? (
+                <Sun className="h-3.5 w-3.5 text-amber-500" strokeWidth={2.2} />
+              ) : (
+                <Moon className="h-3.5 w-3.5" strokeWidth={2.2} />
+              )}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="text-xs">
+            {darkMode ? "浅色模式" : "深色模式"}
+          </TooltipContent>
+        </Tooltip>
+      </div>
+
+      {/* Center: note info (only when a note is active) */}
+      {noteInfo && (
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground/70 truncate max-w-[60%]">
+          {noteInfo}
+        </div>
+      )}
+
+      {/* Right: note actions (only when a note is active) */}
+      {actions && (
+        <div className="flex items-center gap-0.5">{actions}</div>
+      )}
+    </div>
+  );
+}
+
+function NoteStats({ content }: { content: string }) {
+  const stats = useMemo(() => {
+    const text = content.replace(/!\[\[[^\]\r\n]+\]\]/g, "");
+    const charCount = text.length;
+    // Approximate: CJK chars + space-separated Latin words
+    const cjkCount = (text.match(/[一-鿿぀-ヿ가-��]/g) ?? []).length;
+    const wordCount = cjkCount + (text.replace(/[一-鿿぀-ヿ가-��]/g, "").match(/\S+/g) ?? []).length;
+    const readingMinutes = Math.max(1, Math.round(wordCount / 350));
+    return { charCount, wordCount, readingMinutes };
+  }, [content]);
+
+  return (
+    <div className="flex items-center gap-4 text-[11px] text-muted-foreground/50">
+      <span>{stats.charCount} 字符</span>
+      <span className="text-muted-foreground/20">|</span>
+      <span>{stats.wordCount} 字</span>
+      <span className="text-muted-foreground/20">|</span>
+      <span>约 {stats.readingMinutes} 分钟阅读</span>
     </div>
   );
 }
@@ -237,7 +359,7 @@ function TextSegmentEditor({
       value={value}
       onChange={(event) => onChange(event.target.value)}
       placeholder="开始写作..."
-      className="block w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-sm leading-relaxed outline-none placeholder:text-muted-foreground focus-visible:ring-0"
+      className="editor-focus-mode block w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-[15px] leading-[1.8] tracking-wide text-foreground outline-none placeholder:text-muted-foreground/40 focus-visible:ring-0 selection:bg-primary/15"
       spellCheck
     />
   );
@@ -288,7 +410,7 @@ function LiveEditor({
 
   return (
     <div
-      className="w-full min-h-full text-sm leading-relaxed whitespace-pre-wrap break-words outline-none"
+      className="w-full min-h-full text-[15px] leading-[1.8] whitespace-pre-wrap break-words tracking-wide outline-none"
       onPasteCapture={onPasteCapture}
     >
       {segments.map((segment, index) =>
@@ -349,6 +471,10 @@ export function NoteEditor() {
   const folders = useNoteStore((s) => s.folders);
   const updateNote = useNoteStore((s) => s.updateNote);
   const deleteNote = useNoteStore((s) => s.deleteNote);
+  const sidebarOpen = useNoteStore((s) => s.sidebarOpen);
+  const toggleSidebar = useNoteStore((s) => s.toggleSidebar);
+  const darkMode = useNoteStore((s) => s.darkMode);
+  const toggleDarkMode = useNoteStore((s) => s.toggleDarkMode);
 
   const activeNote = notes.find((n) => n.id === activeNoteId);
   const activeFolder = folders.find((f) => f.id === activeNote?.folder);
@@ -529,12 +655,27 @@ export function NoteEditor() {
 
   if (!activeNote) {
     return (
-      <div className="flex flex-col items-center justify-center h-full text-muted-foreground bg-background">
-        <div className="text-center max-w-md">
-          <div className="mb-3 inline-flex items-center justify-center w-12 h-12 rounded-md bg-muted">
-            <Edit3 className="h-6 w-6 opacity-40" />
+      <div className="flex flex-col h-full bg-background">
+        <UnifiedTopBar
+          sidebarOpen={sidebarOpen}
+          toggleSidebar={toggleSidebar}
+          darkMode={darkMode}
+          toggleDarkMode={toggleDarkMode}
+        />
+        <div className="flex flex-col items-center justify-center flex-1 text-muted-foreground bg-gradient-to-b from-transparent to-muted/10">
+          <div className="text-center max-w-sm fade-in">
+            <div className="mb-5 inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-primary/10 to-primary/5 shadow-inner">
+              <Edit3 className="h-7 w-7 text-primary/50" strokeWidth={1.5} />
+            </div>
+            <h2 className="text-lg font-semibold text-foreground/70 mb-2">
+              选择一个笔记开始写作
+            </h2>
+            <p className="text-sm text-muted-foreground/60 leading-relaxed">
+              从左侧列表中选择一个笔记，
+              <br />
+              或点击「新建笔记」开始创作。
+            </p>
           </div>
-          <h2 className="text-sm font-medium">选择一个笔记</h2>
         </div>
       </div>
     );
@@ -542,71 +683,140 @@ export function NoteEditor() {
 
   return (
     <div className="flex flex-col h-full bg-background">
-      <div className="flex items-center justify-between px-4 py-2 border-b bg-muted/20">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Folders className="h-3.5 w-3.5" />
-          <span>{activeFolder?.name || "未分类"}</span>
-          <span className="mx-1">·</span>
-          <Clock className="h-3.5 w-3.5" />
-          <span>
-            {new Date(activeNote.updatedAt).toLocaleString("zh-CN", {
-              month: "short",
-              day: "numeric",
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
-          </span>
-        </div>
-        <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={() => void updateNote(activeNote.id, { pinned: !activeNote.pinned })}
-          >
-            <Pin
-              className={`h-3.5 w-3.5 ${
-                activeNote.pinned ? "text-amber-500 fill-amber-500" : ""
-              }`}
-            />
-          </Button>
-
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-7 w-7">
-                <MoreHorizontal className="h-3.5 w-3.5" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem
-                className="text-destructive focus:text-destructive"
-                onClick={openDeleteDialog}
-              >
-                <Trash2 className="h-4 w-4 mr-2" />
-                删除笔记
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      </div>
+      {/* Unified top bar: sidebar + dark mode (left), note info + actions (right) */}
+      <UnifiedTopBar
+        sidebarOpen={sidebarOpen}
+        toggleSidebar={toggleSidebar}
+        darkMode={darkMode}
+        toggleDarkMode={toggleDarkMode}
+        noteInfo={
+          <>
+            <span className="inline-flex items-center gap-1.5">
+              <Folders className="h-3.5 w-3.5" />
+              <span className="font-medium">{activeFolder?.name || "未分类"}</span>
+            </span>
+            <span className="text-muted-foreground/25">|</span>
+            <span className="inline-flex items-center gap-1.5">
+              <CalendarDays className="h-3.5 w-3.5" />
+              {new Date(activeNote.updatedAt).toLocaleDateString("zh-CN", {
+                month: "short",
+                day: "numeric",
+              })}
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <Clock className="h-3.5 w-3.5" />
+              {new Date(activeNote.updatedAt).toLocaleTimeString("zh-CN", {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </span>
+          </>
+        }
+        actions={
+          <>
+            <Tooltip delayDuration={300}>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={cn(
+                    "h-7 w-7 rounded-md",
+                    activeNote.pinned &&
+                      "text-amber-500 bg-amber-500/10 hover:bg-amber-500/15"
+                  )}
+                  onClick={() =>
+                    void updateNote(activeNote.id, {
+                      pinned: !activeNote.pinned,
+                    })
+                  }
+                >
+                  <Pin
+                    className={cn(
+                      "h-3.5 w-3.5",
+                      activeNote.pinned && "fill-current"
+                    )}
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-xs">
+                {activeNote.pinned ? "取消置顶" : "置顶"}
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip delayDuration={300}>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={cn(
+                    "h-7 w-7 rounded-md",
+                    activeNote.favorite &&
+                      "text-rose-500 bg-rose-500/10 hover:bg-rose-500/15"
+                  )}
+                  onClick={() =>
+                    void updateNote(activeNote.id, {
+                      favorite: !activeNote.favorite,
+                    })
+                  }
+                >
+                  <Star
+                    className={cn(
+                      "h-3.5 w-3.5",
+                      activeNote.favorite && "fill-current"
+                    )}
+                  />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-xs">
+                {activeNote.favorite ? "取消收藏" : "收藏"}
+              </TooltipContent>
+            </Tooltip>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 rounded-md"
+                >
+                  <MoreHorizontal className="h-3.5 w-3.5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-40">
+                <DropdownMenuItem
+                  className="text-destructive focus:text-destructive focus:bg-destructive/10"
+                  onClick={openDeleteDialog}
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  删除笔记
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </>
+        }
+      />
 
       <Tabs defaultValue="preview" className="flex-1 flex flex-col min-h-0">
-        <div className="px-4 pt-1.5 border-b">
-          <TabsList className="h-8">
-            <TabsTrigger value="edit" className="text-xs gap-1.5">
+        <div className="px-6 pt-2 pb-0 border-b border-border/40">
+          <TabsList className="h-9 bg-transparent p-0 gap-1">
+            <TabsTrigger
+              value="edit"
+              className="h-8 rounded-t-lg rounded-b-none border border-b-0 border-transparent data-[state=active]:border-border/60 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm px-4 text-xs gap-1.5 text-muted-foreground"
+            >
               <Edit3 className="h-3.5 w-3.5" />
               编辑
             </TabsTrigger>
-            <TabsTrigger value="preview" className="text-xs gap-1.5">
+            <TabsTrigger
+              value="preview"
+              className="h-8 rounded-t-lg rounded-b-none border border-b-0 border-transparent data-[state=active]:border-border/60 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm px-4 text-xs gap-1.5 text-muted-foreground"
+            >
               <Eye className="h-3.5 w-3.5" />
               预览
             </TabsTrigger>
           </TabsList>
         </div>
 
-        <TabsContent value="edit" className="flex-1 p-0 m-0 min-h-0">
+        <TabsContent value="edit" className="flex-1 p-0 m-0 min-h-0 fade-in">
           <div className="h-full flex flex-col">
-            <div className="px-4 pt-3 pb-1">
+            <div className="px-8 pt-6 pb-0">
               {editTitle ? (
                 <Input
                   value={title}
@@ -618,39 +828,46 @@ export function NoteEditor() {
                   onKeyDown={(e) => {
                     if (e.key === "Enter") setEditTitle(false);
                   }}
-                  className="text-lg font-bold border-0 p-0 h-8 focus-visible:ring-0"
+                  className="text-[1.7rem] font-bold tracking-tight border-0 p-0 h-11 leading-tight focus-visible:ring-0 bg-transparent"
                   autoFocus
                 />
               ) : (
                 <h2
-                  className="text-lg font-bold cursor-text hover:bg-muted/50 -ml-1 px-1 py-0.5 rounded"
+                  className="text-[1.7rem] font-bold tracking-tight leading-tight cursor-text hover:bg-muted/40 -ml-2 px-2 py-1 rounded-lg transition-colors text-foreground"
                   onClick={() => setEditTitle(true)}
                 >
                   {activeNote.title || "未命名笔记"}
                 </h2>
               )}
             </div>
-            <div className="flex-1 overflow-auto px-4 pb-4 pt-1">
-              <LiveEditor
-                content={content}
-                onChange={(nextContent) => {
-                  contentDirtyRef.current = true;
-                  setContent(nextContent);
-                }}
-                onImageRemove={handleImageRemove}
-                onPasteCapture={handlePasteCapture}
-              />
+            <div className="flex-1 overflow-auto px-8 pb-3 pt-3">
+              <div className="max-w-[72ch] mx-auto">
+                <LiveEditor
+                  content={content}
+                  onChange={(nextContent) => {
+                    contentDirtyRef.current = true;
+                    setContent(nextContent);
+                  }}
+                  onImageRemove={handleImageRemove}
+                  onPasteCapture={handlePasteCapture}
+                />
+              </div>
+            </div>
+            <div className="px-8 py-1.5 border-t border-border/30">
+              <NoteStats content={content} />
             </div>
           </div>
         </TabsContent>
 
-        <TabsContent value="preview" className="flex-1 p-0 m-0 min-h-0 overflow-auto">
-          <div className="px-8 py-4 w-full">
-            <h1 className="text-2xl font-bold mb-4">
-              {activeNote.title || "未命名笔记"}
-            </h1>
-            <div className="prose prose-sm dark:prose-invert max-w-none prose-headings:font-semibold prose-a:text-primary prose-code:bg-muted prose-code:px-1.5 prose-code:rounded prose-code:text-foreground prose-pre:bg-[#f6f8fa] dark:prose-pre:bg-muted/60 prose-pre:border prose-pre:shadow-sm prose-pre:text-[#1a1a1a] dark:prose-pre:text-foreground">
-              <PreviewContent content={content} />
+        <TabsContent value="preview" className="flex-1 p-0 m-0 min-h-0 overflow-auto fade-in">
+          <div className="px-8 pt-6 pb-4 w-full">
+            <div className="max-w-[72ch] mx-auto">
+              <h1 className="text-[1.7rem] font-bold tracking-tight leading-tight text-foreground pb-2">
+                {activeNote.title || "未命名笔记"}
+              </h1>
+              <div className="note-prose">
+                <PreviewContent content={content} />
+              </div>
             </div>
           </div>
         </TabsContent>

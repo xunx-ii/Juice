@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Sidebar } from "@/components/Sidebar";
 import { NoteEditor } from "@/components/NoteEditor";
+import { ToastViewport } from "@/components/ToastViewport";
 import { useNoteStore } from "@/store/useNoteStore";
 import { useSyncStore } from "@/sync/useSyncStore";
 import { cn } from "@/lib/utils";
@@ -45,61 +46,43 @@ function App() {
 
   return (
     <TooltipProvider>
-      <div className="h-screen w-screen flex overflow-hidden bg-background text-foreground">
+      <div className="h-screen w-screen flex overflow-hidden bg-background text-foreground relative">
         {/* Sidebar */}
         <div
           className={cn(
-            "flex-shrink-0 transition-all duration-200 ease-in-out overflow-hidden",
-            sidebarOpen ? "w-72" : "w-0"
+            "flex-shrink-0 transition-all duration-300 ease-[cubic-bezier(0.25,0.1,0.25,1)] overflow-hidden",
+            sidebarOpen ? "w-[280px]" : "w-0"
           )}
         >
-          <Sidebar />
+          <div className="w-[280px] h-full">
+            <Sidebar />
+          </div>
         </div>
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col min-w-0">
-          {/* Top Bar */}
-          <header className="flex items-center justify-between px-3 h-10 border-b bg-muted/10 shrink-0">
-            <div className="flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7"
-                onClick={toggleSidebar}
-              >
-                {sidebarOpen ? (
-                  <PanelLeft className="h-4 w-4" />
-                ) : (
-                  <PanelRight className="h-4 w-4" />
-                )}
-              </Button>
-            </div>
-
-            <div className="flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7"
-                onClick={toggleDarkMode}
-              >
-                {darkMode ? (
-                  <Sun className="h-4 w-4" />
-                ) : (
-                  <Moon className="h-4 w-4" />
-                )}
-              </Button>
-            </div>
-          </header>
-
           {/* Editor */}
           <main className="flex-1 min-h-0">
             {loading ? (
-              <div className="h-full flex items-center justify-center text-muted-foreground">
-                <Loader2 className="h-5 w-5 animate-spin" />
+              <div className="h-full flex flex-col items-center justify-center gap-3 text-muted-foreground/60">
+                <div className="relative">
+                  <Loader2 className="h-7 w-7 animate-spin text-primary/40" />
+                </div>
+                <span className="text-sm">加载中...</span>
               </div>
             ) : error ? (
-              <div className="h-full flex items-center justify-center text-sm text-destructive">
-                {error}
+              <div className="h-full flex items-center justify-center text-sm text-destructive bg-destructive/5">
+                <div className="flex items-center gap-2 px-6 py-3 rounded-lg border border-destructive/20 bg-destructive/5">
+                  <span className="font-medium">{error}</span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs ml-2"
+                    onClick={() => useNoteStore.getState().initialize()}
+                  >
+                    重试
+                  </Button>
+                </div>
               </div>
             ) : (
               <NoteEditor />
@@ -107,6 +90,7 @@ function App() {
           </main>
         </div>
       </div>
+      <ToastViewport />
     </TooltipProvider>
   );
 }

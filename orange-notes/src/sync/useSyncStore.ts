@@ -3,6 +3,7 @@ import { create } from "zustand";
 import type { RemoteAttachmentMeta } from "./protocol";
 import { syncClient, SyncClient, type RemoteStateMessage } from "./client";
 import { useNoteStore } from "../store/useNoteStore";
+import { showToast } from "@/store/useToastStore";
 import {
   notifyNoteImageAvailable,
   notifyNoteImagesDeleted,
@@ -37,8 +38,8 @@ export interface SyncStore {
 
   setSettings: (settings: Partial<SyncSettings>) => void;
   resetSettings: () => void;
-  connectRealtime: () => Promise<void>;
-  pushNow: () => Promise<void>;
+  connectRealtime: (silent?: boolean) => Promise<void>;
+  pushNow: (silent?: boolean) => Promise<void>;
   schedulePush: () => void;
   syncImages: () => Promise<void>;
   cleanupLocalImages: () => Promise<void>;
@@ -124,7 +125,9 @@ function scheduleReconnect() {
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    void useSyncStore.getState().connectRealtime().catch(() => {
+    // Always silent: this is an automatic background retry, not user-initiated.
+    // Startup connection and manual "连接" button use connectRealtime(false) directly.
+    void useSyncStore.getState().connectRealtime(true).catch(() => {
       scheduleReconnect();
     });
     reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_DELAY_MS);
@@ -191,8 +194,10 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     saveSyncSettings(settings);
     set({ settings, lastError: null });
 
+    // Background reconnect — never toast. The "连接" button in settings
+    // calls connectRealtime(false) directly for explicit user intent.
     if (hasCompleteSettings(settings)) {
-      void get().connectRealtime().catch(() => {
+      void get().connectRealtime(true).catch(() => {
         scheduleReconnect();
       });
     }
@@ -212,11 +217,12 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     syncClient.disconnect();
   },
 
-  connectRealtime: async () => {
+  connectRealtime: async (silent = false) => {
     const { settings } = get();
     if (!hasCompleteSettings(settings)) {
-      set({ lastError: "请先配置服务器地址、用户名和密码" });
-      return;
+      const msg = "请先配置服务器地址、用户名和密码";
+      set({ lastError: msg });
+      throw new Error(msg);
     }
 
     try {
@@ -236,14 +242,19 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
         authenticated: syncClient.isAuthenticated(),
         lastError: message,
       });
+      // Only surface as toast when explicitly user-initiated (e.g. "连接" button).
+      // Background reconnect / setSettings-triggered calls stay silent.
+      if (!silent) showToast(message, "destructive");
       scheduleReconnect();
       throw new Error(message);
     }
   },
 
-  pushNow: async () => {
+  pushNow: async (silent = false) => {
     if (!hasCompleteSettings(get().settings)) {
-      set({ lastError: "请先配置服务器地址、用户名和密码" });
+      const msg = "请先配置服务器地址、用户名和密码";
+      set({ lastError: msg });
+      if (!silent) showToast(msg, "destructive");
       return;
     }
 
@@ -256,7 +267,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     set({ syncing: true, lastError: null });
 
     try {
-      await get().connectRealtime();
+      await get().connectRealtime(silent);
       await get().syncImages();
       for (let attempt = 0; attempt < MAX_PUSH_ATTEMPTS; attempt += 1) {
         const noteStore = useNoteStore.getState();
@@ -278,9 +289,11 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
         authenticated: syncClient.isAuthenticated(),
         lastError: null,
       });
+      if (!silent) showToast("同步完成", "success", 2500);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       set({ lastError: message });
+      if (!silent) showToast(message, "destructive");
       scheduleReconnect();
     } finally {
       set({ syncing: false });
@@ -299,7 +312,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     clearPushTimer();
     pushTimer = setTimeout(() => {
       pushTimer = null;
-      void useSyncStore.getState().pushNow();
+      void useSyncStore.getState().pushNow(true);
     }, PUSH_DELAY_MS);
   },
 
@@ -363,7 +376,8 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       set({ lastError: message });
-      console.error(`Failed to download synced image: ${fileName}`, error);
+      // Silent — image download failures are retryable and not user-critical.
+      console.debug(`Failed to download synced image: ${fileName}`, error);
     }
   },
 

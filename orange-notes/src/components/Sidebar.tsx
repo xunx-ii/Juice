@@ -1,4 +1,16 @@
-import { Plus, FolderPlus, Settings, Check, Loader2, Save, RefreshCw, Moon, Sun } from "lucide-react";
+import {
+  Plus,
+  FolderPlus,
+  Settings,
+  Check,
+  Loader2,
+  Save,
+  RefreshCw,
+  Moon,
+  Sun,
+  Wifi,
+  WifiOff,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SearchBar } from "@/components/SearchBar";
 import { TreeView } from "@/components/TreeView";
@@ -15,11 +27,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { useSyncStore } from "@/sync/useSyncStore";
 import { SyncClient } from "@/sync/client";
+import { showToast } from "@/store/useToastStore";
 
 function SyncSettingsSection() {
   const {
     settings,
-    lastError,
     lastSync,
     setSettings,
     syncing,
@@ -30,30 +42,25 @@ function SyncSettingsSection() {
   const [address, setAddress] = useState(settings.address);
   const [username, setUsername] = useState(settings.username);
   const [password, setPassword] = useState(settings.password);
-  const [status, setStatus] = useState<"idle" | "testing" | "ok" | "fail">("idle");
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [showRegister, setShowRegister] = useState(false);
   const [regUsername, setRegUsername] = useState("");
   const [regPassword, setRegPassword] = useState("");
-  const [regStatus, setRegStatus] = useState<"idle" | "loading" | "ok" | "fail">("idle");
-  const [regMessage, setRegMessage] = useState<string | null>(null);
+  const [regLoading, setRegLoading] = useState(false);
 
   const handleRegister = async () => {
-    if (!address) {
-      setRegStatus("fail");
-      setRegMessage("请先填写服务器地址");
+    if (!address.trim()) {
+      showToast("请先填写服务器地址", "destructive");
       return;
     }
     if (!regUsername.trim() || !regPassword) {
-      setRegStatus("fail");
-      setRegMessage("请填写用户名和密码");
+      showToast("请填写用户名和密码", "destructive");
       return;
     }
-    setRegStatus("loading");
-    setRegMessage("注册中…");
+    setRegLoading(true);
     try {
       const httpBase = SyncClient.httpBaseUrl(address);
-
       const r = await fetch(`${httpBase}/api/admin/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -61,44 +68,41 @@ function SyncSettingsSection() {
       });
       const data = await r.json();
       if (data.success) {
-        setRegStatus("ok");
-        setRegMessage(data.message);
-        // Auto-fill the credentials.
+        showToast(data.message || "注册成功", "success");
         setUsername(regUsername.trim());
         setPassword(regPassword);
         setRegUsername("");
         setRegPassword("");
       } else {
-        setRegStatus("fail");
-        setRegMessage(data.message);
+        showToast(data.message || "注册失败", "destructive");
       }
     } catch (e) {
-      setRegStatus("fail");
-      setRegMessage(e instanceof Error ? e.message : "注册请求失败");
+      showToast(e instanceof Error ? e.message : "注册请求失败", "destructive");
+    } finally {
+      setRegLoading(false);
     }
   };
 
   const handleTest = async () => {
-    if (!address || !username || !password) {
-      setStatus("fail");
-      setStatusMessage("请填写所有字段");
+    if (!address.trim() || !username.trim() || !password) {
+      showToast("请填写所有字段", "destructive");
       return;
     }
     setSettings({ address, username, password });
-    setStatus("testing");
-    setStatusMessage("正在连接并认证…");
+    setTesting(true);
     try {
-      await connectRealtime();
-      setStatus("ok");
-      setStatusMessage("实时同步已连接");
-    } catch (e) {
-      setStatus("fail");
-      setStatusMessage(e instanceof Error ? e.message : String(e));
+      await connectRealtime(false); // toast on failure shown by connectRealtime
+      showToast("实时同步已连接", "success");
+    } catch {
+      // Error already surfaced by connectRealtime
+    } finally {
+      setTesting(false);
     }
   };
 
   const handleSave = () => {
     setSettings({ address, username, password });
+    showToast("设置已保存", "success", 2000);
   };
 
   const formatLastSync = (ts: number | null) => {
@@ -137,32 +141,29 @@ function SyncSettingsSection() {
         />
       </label>
 
-      {status !== "idle" && (
-        <div className={`text-xs ${
-          status === "fail" ? "text-destructive" : status === "ok" ? "text-emerald-500" : "text-muted-foreground"
-        }`}>
-          {statusMessage}
-        </div>
-      )}
-
       <div className="flex gap-2">
-        <Button variant="secondary" size="sm" disabled={status === "testing" || syncing} onClick={handleTest}>
-          {status === "testing" ? (
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={testing || syncing}
+          onClick={handleTest}
+        >
+          {testing ? (
             <Loader2 className="mr-1 h-3 w-3 animate-spin" />
           ) : (
             <Check className="mr-1 h-3 w-3" />
           )}
           {authenticated ? "已连接" : "连接"}
         </Button>
-        <Button size="sm" onClick={handleSave}>
+        <Button size="sm" onClick={handleSave} disabled={saving}>
           <Save className="mr-1 h-3 w-3" />
           保存
         </Button>
         <Button
           size="sm"
           variant="outline"
-          disabled={syncing || status === "testing"}
-          onClick={pushNow}
+          disabled={syncing || testing}
+          onClick={() => void pushNow()}
           title="立即同步笔记"
         >
           {syncing ? (
@@ -173,11 +174,8 @@ function SyncSettingsSection() {
         </Button>
       </div>
 
-      {lastError && (
-        <div className="text-xs text-destructive">{lastError}</div>
-      )}
-
-      {!lastError && lastSync && (
+      {/* Status line — only shows neutral info, never errors */}
+      {lastSync && (
         <div className="text-xs text-muted-foreground">
           {formatLastSync(lastSync)}
         </div>
@@ -186,7 +184,7 @@ function SyncSettingsSection() {
       {/* Registration toggle */}
       <button
         type="button"
-        className="text-xs text-blue-400 hover:text-blue-300 cursor-pointer"
+        className="text-xs text-primary/80 hover:text-primary cursor-pointer transition-colors"
         onClick={() => setShowRegister(!showRegister)}
       >
         {showRegister ? "取消注册" : "还没有账号？立即注册"}
@@ -208,22 +206,14 @@ function SyncSettingsSection() {
           <Button
             size="sm"
             variant="outline"
-            disabled={regStatus === "loading"}
+            disabled={regLoading}
             onClick={handleRegister}
           >
-            {regStatus === "loading" ? (
+            {regLoading ? (
               <Loader2 className="mr-1 h-3 w-3 animate-spin" />
             ) : null}
             注册
           </Button>
-          {regMessage && (
-            <div className={`text-xs ${
-              regStatus === "ok" ? "text-emerald-500" :
-              regStatus === "fail" ? "text-destructive" : "text-muted-foreground"
-            }`}>
-              {regMessage}
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -313,21 +303,22 @@ export function Sidebar() {
   };
 
   return (
-    <div className="flex flex-col h-full bg-background border-r border-border">
+    <div className="flex flex-col h-full bg-background/80 backdrop-blur-sm border-r border-border/60">
       {/* Header */}
-      <div className="px-3 py-3">
-        <h1 className="text-sm font-semibold text-foreground tracking-tight mb-3">
+      <div className="px-4 pt-4 pb-3">
+        <h1 className="text-base font-bold text-foreground tracking-tight mb-3 flex items-center gap-2">
+          <span className="inline-block h-5 w-1.5 rounded-full bg-gradient-to-b from-orange-400 to-amber-500" />
           桔子笔记
         </h1>
         <SearchBar />
       </div>
 
       {/* Toolbar */}
-      <div className="flex items-center gap-0.5 px-2 pb-1">
+      <div className="flex items-center gap-1 px-3 pb-2">
         <Button
-          variant="ghost"
+          variant="default"
           size="sm"
-          className="h-7 text-xs gap-1 px-2"
+          className="h-8 text-xs gap-1.5 px-3 font-medium flex-1 shadow-sm"
           onClick={handleCreateNote}
         >
           <Plus className="h-3.5 w-3.5" />
@@ -335,36 +326,49 @@ export function Sidebar() {
         </Button>
         <Button
           variant="ghost"
-          size="sm"
-          className="h-7 text-xs gap-1 px-2"
+          size="icon"
+          className="h-8 w-8"
           onClick={() => setShowNewFolder(true)}
         >
-          <FolderPlus className="h-3.5 w-3.5" />
-          新建文件夹
+          <FolderPlus className="h-4 w-4" />
         </Button>
       </div>
 
-      <Separator className="mx-3 w-auto" />
+      <div className="mx-4 mb-1 h-px bg-border/50" />
 
       {/* Tree View */}
       <TreeView />
 
       {/* Footer */}
-      <div className="flex items-center justify-between px-3 py-1.5 border-t border-border shrink-0">
+      <div className="flex items-center justify-between px-3 py-2 border-t border-border/60 shrink-0 backdrop-blur-sm bg-muted/20">
         <div className="flex items-center gap-2">
-          <span className={`inline-block w-2 h-2 rounded-full ${syncConnected ? "bg-green-500" : "bg-gray-400"}`} />
-          <span className="text-[11px] text-muted-foreground">
-            {syncConnected
-              ? syncLastSync
-                ? `已同步 · ${new Date(syncLastSync).toLocaleTimeString("zh-CN")}`
-                : "已连接"
-              : "未连接"}
+          <span className="relative flex items-center gap-1.5">
+            {syncConnected ? (
+              <>
+                <span className="relative flex h-2 w-2 justify-center items-center">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-50" />
+                  <Wifi className="h-3 w-3 text-emerald-500 relative" />
+                </span>
+                <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium">
+                  {syncLastSync
+                    ? `已同步 · ${new Date(syncLastSync).toLocaleTimeString("zh-CN")}`
+                    : "已连接"}
+                </span>
+              </>
+            ) : (
+              <>
+                <WifiOff className="h-3 w-3 text-muted-foreground/50" />
+                <span className="text-[11px] text-muted-foreground/60">
+                  未连接
+                </span>
+              </>
+            )}
           </span>
         </div>
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7"
+          className="h-7 w-7 rounded-lg hover:bg-accent/60"
           onClick={() => setShowSettings(true)}
         >
           <Settings className="h-3.5 w-3.5" />

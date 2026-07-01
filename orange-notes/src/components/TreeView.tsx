@@ -32,20 +32,20 @@ function DropIndicator({ depth, position }: { depth: number; position: "before" 
     <div
       className={cn(
         "absolute pointer-events-none z-20",
-        "h-[2px] rounded-full bg-[var(--vscode-list-dropBackground,var(--primary,#0078d4))]",
-        position === "before" ? "top-[-1px]" : "bottom-[-1px]"
+        "h-[3px] rounded-full bg-primary/80 shadow-[0_0_6px_hsl(var(--primary)/0.4)]",
+        position === "before" ? "top-[-2px]" : "bottom-[-2px]"
       )}
       style={{
         left: `${depth * 16 + 8}px`,
-        right: "0px",
+        right: "8px",
       }}
     >
-      {/* End-caps: two small squares at each end of the line */}
+      {/* End-caps: small squares */}
       <div
-        className="absolute top-[-2px] left-0 h-[6px] w-[6px] rounded-full bg-[var(--vscode-list-dropBackground,var(--primary,#0078d4))]"
+        className="absolute top-[-3px] left-0 h-[3px] w-[7px] rounded-l-[1px] rounded-r-[3px] bg-primary shadow-[0_0_4px_hsl(var(--primary)/0.5)]"
       />
       <div
-        className="absolute top-[-2px] right-0 h-[6px] w-[6px] rounded-full bg-[var(--vscode-list-dropBackground,var(--primary,#0078d4))]"
+        className="absolute top-[-3px] right-0 h-[3px] w-[7px] rounded-l-[3px] rounded-r-[1px] bg-primary shadow-[0_0_4px_hsl(var(--primary)/0.5)]"
       />
     </div>
   );
@@ -198,59 +198,66 @@ function ContextMenuFlyout({
     <div
       ref={menuRef}
       style={style}
-      className="min-w-[170px] rounded-lg border bg-popover p-1 text-popover-foreground shadow-xl animate-in fade-in-0 zoom-in-95"
+      className="min-w-[170px] rounded-lg border border-border/60 bg-popover/95 backdrop-blur-md p-1 text-popover-foreground shadow-xl animate-in fade-in-0 zoom-in-95"
     >
       {state.type === "folder" ? (
         <>
           <button
-            className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded-sm hover:bg-accent"
+            className="flex items-center gap-2.5 w-full px-2.5 py-[7px] text-xs rounded-md hover:bg-accent/80 active:scale-[0.98] transition-all"
             onClick={() => act(() => onNewNoteInFolder(state.id))}
           >
-            <FilePlus className="h-4 w-4" />新建笔记
+            <FilePlus className="h-3.5 w-3.5" />
+            <span className="font-medium">新建笔记</span>
           </button>
           <button
-            className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded-sm hover:bg-accent"
+            className="flex items-center gap-2.5 w-full px-2.5 py-[7px] text-xs rounded-md hover:bg-accent/80 active:scale-[0.98] transition-all"
             onClick={() => act(() => onNewFolder(state.id))}
           >
-            <FolderPlus className="h-4 w-4" />新建子文件夹
+            <FolderPlus className="h-3.5 w-3.5" />
+            <span className="font-medium">新建子文件夹</span>
           </button>
-          <div className="h-px bg-border my-1" />
+          <div className="h-px bg-border/60 my-1" />
           <button
-            className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded-sm hover:bg-accent"
+            className="flex items-center gap-2.5 w-full px-2.5 py-[7px] text-xs rounded-md hover:bg-accent/80 active:scale-[0.98] transition-all"
             onClick={() => act(() => onRename(state.id))}
           >
-            <Pencil className="h-4 w-4" />重命名
+            <Pencil className="h-3.5 w-3.5" />
+            <span className="font-medium">重命名</span>
           </button>
           <button
-            className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded-sm hover:bg-accent text-destructive"
+            className="flex items-center gap-2.5 w-full px-2.5 py-[7px] text-xs rounded-md hover:bg-destructive/10 active:scale-[0.98] transition-all text-destructive focus:text-destructive"
             onClick={() => act(() => onDelete(state.id))}
           >
-            <Trash2 className="h-4 w-4" />删除文件夹
+            <Trash2 className="h-3.5 w-3.5" />
+            <span className="font-medium">删除文件夹</span>
           </button>
         </>
       ) : state.type === "empty" ? (
         <>
           <button
-            className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded-sm hover:bg-accent"
+            className="flex items-center gap-2.5 w-full px-2.5 py-[7px] text-xs rounded-md hover:bg-accent/80 active:scale-[0.98] transition-all"
             onClick={() => act(() => onNewFolder(null))}
           >
-            <FolderPlus className="h-4 w-4" />新建文件夹
+            <FolderPlus className="h-3.5 w-3.5" />
+            <span className="font-medium">新建文件夹</span>
           </button>
         </>
       ) : (
         <>
           <button
-            className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded-sm hover:bg-accent"
+            className="flex items-center gap-2.5 w-full px-2.5 py-[7px] text-xs rounded-md hover:bg-accent/80 active:scale-[0.98] transition-all"
             onClick={() => act(() => onRename(state.id))}
           >
-            <Pencil className="h-4 w-4" />重命名
+            <Pencil className="h-3.5 w-3.5" />
+            <span className="font-medium">重命名</span>
           </button>
-          <div className="h-px bg-border my-1" />
+          <div className="h-px bg-border/60 my-1" />
           <button
-            className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded-sm hover:bg-accent text-destructive"
+            className="flex items-center gap-2.5 w-full px-2.5 py-[7px] text-xs rounded-md hover:bg-destructive/10 active:scale-[0.98] transition-all text-destructive focus:text-destructive"
             onClick={() => act(() => onDelete(state.id))}
           >
-            <Trash2 className="h-4 w-4" />删除
+            <Trash2 className="h-3.5 w-3.5" />
+            <span className="font-medium">删除</span>
           </button>
         </>
       )}
@@ -718,7 +725,7 @@ export function TreeView() {
         }}
       >
         <ScrollArea className="h-full">
-          <div className="py-1 space-y-0 relative">
+          <div className="py-1.5 px-1 space-y-0 relative">
             {rows.length === 0 && !isSearching && (
               <EmptyHint onCreateFolder={() => openFolderDialog(null)} />
             )}
@@ -867,14 +874,14 @@ function TreeRow({
       }}
       onPointerDown={(e) => onPointerDown(e, row)}
       className={cn(
-        "group relative flex items-center gap-1 px-1 py-[2px] rounded-[3px] cursor-pointer text-sm select-none touch-none",
-        "transition-colors duration-75",
-        row.isActive && "bg-[var(--vscode-list-activeSelectionBackground,var(--accent,#094771))] text-[var(--vscode-list-activeSelectionForeground,var(--accent-foreground,#fff))]",
-        !row.isActive && "hover:bg-[var(--vscode-list-hoverBackground,hsl(var(--accent)/0.4))]",
+        "group relative flex items-center gap-1.5 px-2 py-[3px] rounded-lg cursor-pointer text-sm select-none touch-none",
+        "transition-all duration-150 ease-out",
+        row.isActive && "bg-accent text-accent-foreground shadow-sm font-medium",
+        !row.isActive && "hover:bg-accent/50",
         dragging && "opacity-40",
         dropInside &&
           isFolder &&
-          "bg-[var(--vscode-list-dropBackground,hsl(var(--primary)/15%,#0078d426))]"
+          "bg-primary/10 ring-1 ring-inset ring-primary/20"
       )}
       style={{ paddingLeft: `${8 + row.depth * 16}px` }}
     >
@@ -884,12 +891,12 @@ function TreeRow({
       )}
 
       {/* Chevron */}
-      <span className="w-4 flex items-center justify-center shrink-0">
+      <span className="w-4 h-4 flex items-center justify-center shrink-0 rounded hover:bg-foreground/5">
         {isFolder ? (
           row.isExpanded ? (
-            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60 group-hover:text-muted-foreground" />
           ) : (
-            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60 group-hover:text-muted-foreground transition-transform group-hover:translate-x-px" />
           )
         ) : (
           <span className="w-3.5" />
@@ -899,29 +906,33 @@ function TreeRow({
       {/* Icon */}
       <Icon
         className={cn(
-          "h-[18px] w-[18px] shrink-0",
-          isFolder ? "text-sky-400 dark:text-sky-500" : row.isPinned ? "text-amber-500" : "text-foreground/65"
+          "h-4.5 w-4.5 shrink-0 transition-transform duration-200",
+          isFolder && row.isExpanded && "scale-110",
+          isFolder ? "text-amber-500 dark:text-amber-400" : row.isPinned ? "text-amber-500" : "text-muted-foreground/70"
         )}
+        strokeWidth={isFolder ? 1.75 : 2}
       />
 
       {/* Label */}
-      <span className="flex-1 truncate text-[13px] leading-tight">{row.label}</span>
+      <span className="flex-1 truncate text-[13.5px] leading-snug">{row.label}</span>
     </div>
   );
 }
 
 function EmptyHint({ onCreateFolder }: { onCreateFolder: () => void }) {
   return (
-    <div className="px-3 py-6 flex flex-col items-center gap-2 text-muted-foreground">
-      <FolderPlus className="h-6 w-6 opacity-40" />
+    <div className="px-3 py-8 flex flex-col items-center gap-3 text-muted-foreground">
+      <div className="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-gradient-to-br from-primary/8 to-muted">
+        <FolderPlus className="h-5 w-5 text-muted-foreground/50" />
+      </div>
       <p className="text-xs">还没有文件夹</p>
       <Button
         variant="outline"
-        size="xs"
-        className="h-7 text-xs gap-1 mt-1"
+        size="sm"
+        className="h-8 text-xs gap-1.5 mt-1 shadow-sm"
         onClick={onCreateFolder}
       >
-        <FolderPlus className="h-3 w-3" />
+        <FolderPlus className="h-3.5 w-3.5" />
         新建文件夹
       </Button>
     </div>
