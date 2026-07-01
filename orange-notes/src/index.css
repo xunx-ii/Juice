@@ -100,8 +100,28 @@
 
   .note-preview {
     cursor: text;
+    isolation: isolate;
     outline: none;
     touch-action: pan-y;
+  }
+
+  .preview-selection-layer {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .preview-selection-rect {
+    position: absolute;
+    border-radius: 2px;
+    background: hsl(var(--primary) / 0.24);
+  }
+
+  .preview-content {
+    position: relative;
+    z-index: 1;
   }
 
   .note-preview,
