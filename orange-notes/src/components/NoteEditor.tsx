@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -213,6 +214,7 @@ function NoteImage({
   return (
     <div
       ref={ref}
+      data-preview-copy-ignore=""
       className={cn(
         "not-prose my-1 inline-flex min-h-14 min-w-20 max-w-full items-center justify-center overflow-hidden rounded-lg border border-border/50 bg-muted/20 align-top",
         "shadow-sm transition-shadow duration-200 hover:shadow-md"
@@ -480,6 +482,30 @@ function getPreviewSelectionText(container: HTMLElement | null) {
   return selection.toString();
 }
 
+function buildPreviewSelectionText(title: string, content: string) {
+  const text = splitSegments(content)
+    .map((segment) => (segment.type === "text" ? segment.value : ""))
+    .join("")
+    .replace(/\r\n?/g, "\n")
+    .trim();
+  const noteTitle = title.trim() || "未命名笔记";
+  return text ? `${noteTitle}\n\n${text}` : noteTitle;
+}
+
+function getTextareaSelectionText(textarea: HTMLTextAreaElement | null) {
+  if (!textarea || document.activeElement !== textarea) return "";
+  const start = Math.min(textarea.selectionStart, textarea.selectionEnd);
+  const end = Math.max(textarea.selectionStart, textarea.selectionEnd);
+  return start === end ? "" : textarea.value.slice(start, end);
+}
+
+function getRenderedPreviewText(container: HTMLElement | null) {
+  if (!container) return "";
+  const clone = container.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll("[data-preview-copy-ignore]").forEach((node) => node.remove());
+  return clone.innerText.trim();
+}
+
 async function writePreviewSelectionToClipboard(text: string) {
   try {
     await invoke("copy_text_to_clipboard", { text });
@@ -528,15 +554,29 @@ export function NoteEditor() {
   const pasteLockRef = useRef(false);
   const deleteInFlightRef = useRef(false);
   const previewRef = useRef<HTMLDivElement>(null);
+  const previewSelectionRef = useRef<HTMLTextAreaElement>(null);
   const debouncedContent = useDebounce(content, 500);
   const debouncedTitle = useDebounce(title, 500);
+  const previewFallbackText = useMemo(
+    () => buildPreviewSelectionText(title, content),
+    [content, title]
+  );
+  const [previewSelectionText, setPreviewSelectionText] = useState(previewFallbackText);
 
   useEffect(() => {
     contentRef.current = content;
   }, [content]);
 
+  useLayoutEffect(() => {
+    const renderedText = getRenderedPreviewText(previewRef.current);
+    const nextText = renderedText || previewFallbackText;
+    setPreviewSelectionText((current) => (current === nextText ? current : nextText));
+  }, [previewFallbackText]);
+
   useEffect(() => {
-    const selectedPreviewText = () => getPreviewSelectionText(previewRef.current);
+    const selectedPreviewText = () =>
+      getTextareaSelectionText(previewSelectionRef.current) ||
+      getPreviewSelectionText(previewRef.current);
 
     const handleCopy = (event: ClipboardEvent) => {
       const text = selectedPreviewText();
@@ -933,19 +973,30 @@ export function NoteEditor() {
 
         <TabsContent value="preview" className="flex-1 p-0 m-0 min-h-0 overflow-auto fade-in">
           <div className="px-8 pt-6 pb-4 w-full">
-            <div
-              ref={previewRef}
-              className="note-preview max-w-[72ch] mx-auto"
-              role="document"
-              tabIndex={0}
-              onDragStart={(event) => event.preventDefault()}
-            >
-              <h1 className="text-[1.7rem] font-bold tracking-tight leading-tight text-foreground pb-2">
-                {activeNote.title || "未命名笔记"}
-              </h1>
-              <div className="note-prose">
-                <PreviewContent content={content} />
+            <div className="note-preview-shell max-w-[72ch] mx-auto">
+              <div
+                ref={previewRef}
+                className="note-preview note-preview-content"
+                role="document"
+                aria-hidden="true"
+                onDragStart={(event) => event.preventDefault()}
+              >
+                <h1 className="text-[1.7rem] font-bold tracking-tight leading-tight text-foreground pb-2">
+                  {activeNote.title || "未命名笔记"}
+                </h1>
+                <div className="note-prose">
+                  <PreviewContent content={content} />
+                </div>
               </div>
+              <textarea
+                ref={previewSelectionRef}
+                value={previewSelectionText}
+                readOnly
+                spellCheck={false}
+                aria-label="预览文本"
+                className="note-preview-selection-textarea"
+                onFocus={() => window.getSelection()?.removeAllRanges()}
+              />
             </div>
           </div>
         </TabsContent>
