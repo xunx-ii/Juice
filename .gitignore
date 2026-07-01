@@ -18,6 +18,7 @@ orange-notes/src-tauri/.tauri
 orange-notes/src-tauri/**/*.sqlite
 orange-notes/src-tauri/**/img
 orange-notes/src-tauri/target/*
+orange-notes-server/notes-data/
 
 # Editor directories and files
 .vscode/*

@@ -30,15 +30,19 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates \
+      gosu \
       libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/src/app/target/release/orange-notes-server /usr/local/bin/orange-notes-server
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN useradd --create-home appuser && mkdir /data && chown appuser:appuser /data
-USER appuser
+RUN useradd --create-home appuser && \
+    mkdir /data && \
+    chown appuser:appuser /data && \
+    chmod +x /usr/local/bin/docker-entrypoint.sh
 WORKDIR /data
 
 ENV DATABASE_URL=/data/notes.sqlite
 EXPOSE 8777
 
-ENTRYPOINT ["/usr/local/bin/orange-notes-server"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
