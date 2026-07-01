@@ -98,6 +98,12 @@
     max-width: 72ch;
   }
 
+  .note-preview {
+    cursor: text;
+    outline: none;
+    touch-action: pan-y;
+  }
+
   .note-preview,
   .note-preview * {
     -webkit-user-select: text !important;
@@ -108,6 +114,7 @@
   .note-preview svg,
   .note-preview button,
   .note-preview input[type="checkbox"] {
+    -webkit-user-drag: none;
     -webkit-user-select: none !important;
     user-select: none !important;
   }
