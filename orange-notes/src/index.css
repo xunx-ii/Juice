@@ -34,7 +34,7 @@
 
   /* ─── Selection ─── */
   ::selection {
-    background-color: hsl(var(--primary) / 0.18);
+    background-color: var(--selection-fill);
     color: inherit;
   }
 }
@@ -98,11 +98,32 @@
     max-width: 72ch;
   }
 
+  .note-preview-shell {
+    position: relative;
+    isolation: isolate;
+  }
+
   .note-preview {
+    position: relative;
+    z-index: 1;
     cursor: text;
     caret-color: transparent;
     outline: none;
     touch-action: pan-y;
+  }
+
+  .preview-selection-layer {
+    position: absolute;
+    inset: 0;
+    overflow: visible;
+    pointer-events: none;
+    z-index: 2;
+  }
+
+  .preview-selection-rect {
+    position: absolute;
+    border-radius: 2px;
+    background: var(--preview-selection-fill);
   }
 
   .note-preview,
@@ -112,14 +133,16 @@
   }
 
   .note-preview ::selection {
-    background-color: hsl(var(--primary) / 0.26);
+    background-color: var(--preview-selection-fill);
     color: inherit;
   }
 
   .note-preview img,
   .note-preview svg,
   .note-preview button,
-  .note-preview input[type="checkbox"] {
+  .note-preview input[type="checkbox"],
+  .preview-selection-layer,
+  .preview-selection-layer * {
     -webkit-user-drag: none;
     -webkit-user-select: none !important;
     user-select: none !important;
@@ -362,7 +385,7 @@
 /* ─── Editor-specific focus mode ─── */
 @layer components {
   .editor-focus-mode textarea {
-    caret-color: hsl(var(--primary));
+    caret-color: var(--primary);
   }
   .editor-focus-mode textarea::placeholder {
     color: hsl(var(--muted-foreground) / 0.4);
@@ -388,6 +411,8 @@
 
 :root {
   --radius: 0.625rem;
+  --selection-fill: rgba(96, 165, 250, 0.22);
+  --preview-selection-fill: rgba(96, 165, 250, 0.3);
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -422,6 +447,8 @@
 }
 
 .dark {
+  --selection-fill: rgba(147, 197, 253, 0.24);
+  --preview-selection-fill: rgba(147, 197, 253, 0.32);
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0.042 265.755);

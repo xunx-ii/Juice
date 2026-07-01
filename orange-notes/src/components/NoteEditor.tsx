@@ -65,6 +65,13 @@ type Segment =
   | { type: "text"; value: string }
   | { type: "image"; fileName: string };
 
+interface PreviewSelectionRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
 interface StoredImage {
   fileName: string;
 }
@@ -467,17 +474,46 @@ function PreviewContent({ content }: { content: string }) {
   );
 }
 
-function getPreviewSelectionText(container: HTMLElement | null) {
+function getPreviewSelection(container: HTMLElement | null) {
   const selection = window.getSelection();
   const anchorNode = selection?.anchorNode;
   const focusNode = selection?.focusNode;
-  if (!container || !selection || selection.isCollapsed || !anchorNode || !focusNode) {
-    return "";
+  if (
+    !container ||
+    !selection ||
+    selection.isCollapsed ||
+    selection.rangeCount === 0 ||
+    !anchorNode ||
+    !focusNode
+  ) {
+    return null;
   }
   if (!container.contains(anchorNode) || !container.contains(focusNode)) {
-    return "";
+    return null;
   }
+  return selection;
+}
+
+function getPreviewSelectionText(container: HTMLElement | null) {
+  const selection = getPreviewSelection(container);
+  if (!selection) return "";
   return selection.toString();
+}
+
+function getPreviewSelectionRects(container: HTMLElement | null): PreviewSelectionRect[] {
+  const selection = getPreviewSelection(container);
+  if (!container || !selection) return [];
+
+  const range = selection.getRangeAt(0);
+  const containerBox = container.getBoundingClientRect();
+  return Array.from(range.getClientRects())
+    .filter((rect) => rect.width > 0.5 && rect.height > 0.5)
+    .map((rect) => ({
+      left: rect.left - containerBox.left,
+      top: rect.top - containerBox.top,
+      width: rect.width,
+      height: rect.height,
+    }));
 }
 
 async function writePreviewSelectionToClipboard(text: string) {
@@ -530,10 +566,27 @@ export function NoteEditor() {
   const previewRef = useRef<HTMLDivElement>(null);
   const debouncedContent = useDebounce(content, 500);
   const debouncedTitle = useDebounce(title, 500);
+  const [previewSelectionRects, setPreviewSelectionRects] = useState<PreviewSelectionRect[]>([]);
 
   useEffect(() => {
     contentRef.current = content;
   }, [content]);
+
+  const updatePreviewSelectionRects = useCallback(() => {
+    setPreviewSelectionRects(getPreviewSelectionRects(previewRef.current));
+  }, []);
+
+  useEffect(() => {
+    document.addEventListener("selectionchange", updatePreviewSelectionRects);
+    window.addEventListener("resize", updatePreviewSelectionRects);
+    window.addEventListener("scroll", updatePreviewSelectionRects, true);
+
+    return () => {
+      document.removeEventListener("selectionchange", updatePreviewSelectionRects);
+      window.removeEventListener("resize", updatePreviewSelectionRects);
+      window.removeEventListener("scroll", updatePreviewSelectionRects, true);
+    };
+  }, [updatePreviewSelectionRects]);
 
   useEffect(() => {
     const selectedPreviewText = () => getPreviewSelectionText(previewRef.current);
@@ -735,6 +788,7 @@ export function NoteEditor() {
       const selection = window.getSelection();
       selection?.removeAllRanges();
       selection?.addRange(range);
+      updatePreviewSelectionRects();
       event.preventDefault();
       return;
     }
@@ -756,7 +810,7 @@ export function NoteEditor() {
     if (navigationKeys.has(key)) return;
 
     event.preventDefault();
-  }, []);
+  }, [updatePreviewSelectionRects]);
 
   if (!activeNote) {
     return (
@@ -966,27 +1020,48 @@ export function NoteEditor() {
 
         <TabsContent value="preview" className="flex-1 p-0 m-0 min-h-0 overflow-auto fade-in">
           <div className="px-8 pt-6 pb-4 w-full">
-            <div
-              ref={previewRef}
-              className="note-preview max-w-[72ch] mx-auto"
-              role="document"
-              tabIndex={0}
-              contentEditable
-              suppressContentEditableWarning
-              spellCheck={false}
-              inputMode="none"
-              onBeforeInput={(event) => event.preventDefault()}
-              onCut={(event) => event.preventDefault()}
-              onPaste={(event) => event.preventDefault()}
-              onDrop={(event) => event.preventDefault()}
-              onDragStart={(event) => event.preventDefault()}
-              onKeyDown={handlePreviewKeyDown}
-            >
-              <h1 className="text-[1.7rem] font-bold tracking-tight leading-tight text-foreground pb-2">
-                {activeNote.title || "未命名笔记"}
-              </h1>
-              <div className="note-prose">
-                <PreviewContent content={content} />
+            <div className="note-preview-shell max-w-[72ch] mx-auto">
+              <div
+                className="preview-selection-layer"
+                aria-hidden="true"
+              >
+                {previewSelectionRects.map((rect, index) => (
+                  <span
+                    key={`${index}-${rect.left}-${rect.top}-${rect.width}-${rect.height}`}
+                    className="preview-selection-rect"
+                    style={{
+                      left: rect.left,
+                      top: rect.top,
+                      width: rect.width,
+                      height: rect.height,
+                    }}
+                  />
+                ))}
+              </div>
+              <div
+                ref={previewRef}
+                className="note-preview"
+                role="document"
+                tabIndex={0}
+                contentEditable
+                suppressContentEditableWarning
+                spellCheck={false}
+                inputMode="none"
+                onBeforeInput={(event) => event.preventDefault()}
+                onCut={(event) => event.preventDefault()}
+                onPaste={(event) => event.preventDefault()}
+                onDrop={(event) => event.preventDefault()}
+                onDragStart={(event) => event.preventDefault()}
+                onKeyDown={handlePreviewKeyDown}
+                onKeyUp={updatePreviewSelectionRects}
+                onPointerUp={updatePreviewSelectionRects}
+              >
+                <h1 className="text-[1.7rem] font-bold tracking-tight leading-tight text-foreground pb-2">
+                  {activeNote.title || "未命名笔记"}
+                </h1>
+                <div className="note-prose">
+                  <PreviewContent content={content} />
+                </div>
               </div>
             </div>
           </div>
