@@ -74,29 +74,6 @@ interface ImagePayload {
   bytes: number[];
 }
 
-interface PreviewSelectionRect {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-}
-
-interface PreviewSelectionDrag {
-  pointerId: number;
-  startRange: Range;
-  startX: number;
-  startY: number;
-  moved: boolean;
-}
-
-type DocumentWithCaretPosition = Document & {
-  caretRangeFromPoint?: (x: number, y: number) => Range | null;
-  caretPositionFromPoint?: (
-    x: number,
-    y: number
-  ) => { offsetNode: Node; offset: number } | null;
-};
-
 const imageUrlCache = new Map<string, string>();
 
 function revokeCachedImage(fileName: string) {
@@ -503,182 +480,6 @@ function getPreviewSelectionText(container: HTMLElement | null) {
   return selection.toString();
 }
 
-function getPreviewContentRoot(container: HTMLElement) {
-  return container.querySelector<HTMLElement>("[data-preview-content]") ?? container;
-}
-
-function isPreviewTextSelectionTarget(target: EventTarget | null) {
-  if (!(target instanceof Node)) return false;
-  const element = target instanceof Element ? target : target.parentElement;
-  if (!element) return false;
-
-  return !element.closest(
-    "button,input,textarea,select,[contenteditable='true'],[contenteditable=''],img,svg"
-  );
-}
-
-function distanceToRect(rect: DOMRect, x: number, y: number) {
-  const dx = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
-  const dy = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
-  return Math.hypot(dx, dy);
-}
-
-function verticalDistanceToRect(rect: DOMRect, y: number) {
-  if (y < rect.top) return rect.top - y;
-  if (y > rect.bottom) return y - rect.bottom;
-  return 0;
-}
-
-function rectsShareLine(a: DOMRect, b: DOMRect) {
-  const overlap = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
-  return overlap > 0 || Math.abs((a.top + a.bottom) / 2 - (b.top + b.bottom) / 2) < 3;
-}
-
-function selectablePreviewTextNode(node: Node) {
-  if (node.nodeType !== Node.TEXT_NODE) return false;
-  const text = node.textContent ?? "";
-  if (!/\S/.test(text)) return false;
-
-  const parent = node.parentElement;
-  if (!parent) return false;
-  return !parent.closest(
-    ".preview-selection-layer,button,input,textarea,select,[contenteditable='true'],[contenteditable=''],img,svg"
-  );
-}
-
-function textOffsetFromPointOnLine(node: Text, lineRect: DOMRect, x: number, y: number) {
-  const text = node.data;
-  const range = document.createRange();
-  let bestOffset = 0;
-  let bestScore = Number.POSITIVE_INFINITY;
-
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index];
-    if (char === "\n" || char === "\r") continue;
-
-    range.setStart(node, index);
-    range.setEnd(node, index + 1);
-
-    for (const rect of Array.from(range.getClientRects())) {
-      if (rect.width === 0 && rect.height === 0) continue;
-      if (!rectsShareLine(rect, lineRect)) continue;
-
-      const offset = x <= rect.left + rect.width / 2 ? index : index + 1;
-      const horizontalDistance = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
-      const score = verticalDistanceToRect(rect, y) * 1000 + horizontalDistance;
-      if (score < bestScore) {
-        bestScore = score;
-        bestOffset = offset;
-      }
-    }
-  }
-
-  return bestOffset;
-}
-
-function fallbackPreviewCaretRangeFromPoint(
-  container: HTMLElement,
-  x: number,
-  y: number
-): Range | null {
-  const root = getPreviewContentRoot(container);
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode: (node) =>
-      selectablePreviewTextNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT,
-  });
-
-  let best:
-    | {
-        node: Text;
-        rect: DOMRect;
-        score: number;
-      }
-    | null = null;
-
-  while (walker.nextNode()) {
-    const node = walker.currentNode as Text;
-    const nodeRange = document.createRange();
-    nodeRange.selectNodeContents(node);
-
-    for (const rect of Array.from(nodeRange.getClientRects())) {
-      if (rect.width === 0 && rect.height === 0) continue;
-      const score = distanceToRect(rect, x, y);
-      if (!best || score < best.score) {
-        best = { node, rect, score };
-      }
-    }
-  }
-
-  if (!best) return null;
-
-  const range = document.createRange();
-  const offset = textOffsetFromPointOnLine(best.node, best.rect, x, y);
-  range.setStart(best.node, offset);
-  range.collapse(true);
-  return range;
-}
-
-function previewCaretRangeFromPoint(
-  container: HTMLElement,
-  x: number,
-  y: number
-): Range | null {
-  const root = getPreviewContentRoot(container);
-  const doc = document as DocumentWithCaretPosition;
-  const range = doc.caretRangeFromPoint?.(x, y);
-  if (range) {
-    return root.contains(range.startContainer) ? range : fallbackPreviewCaretRangeFromPoint(container, x, y);
-  }
-
-  const position = doc.caretPositionFromPoint?.(x, y);
-  if (!position || !root.contains(position.offsetNode)) {
-    return fallbackPreviewCaretRangeFromPoint(container, x, y);
-  }
-
-  const fallbackRange = document.createRange();
-  fallbackRange.setStart(position.offsetNode, position.offset);
-  fallbackRange.collapse(true);
-  return fallbackRange;
-}
-
-function createOrderedPreviewRange(
-  container: HTMLElement,
-  startRange: Range,
-  focusRange: Range
-) {
-  if (
-    !container.contains(startRange.startContainer) ||
-    !container.contains(focusRange.startContainer)
-  ) {
-    return null;
-  }
-
-  const range = document.createRange();
-  if (startRange.compareBoundaryPoints(Range.START_TO_START, focusRange) <= 0) {
-    range.setStart(startRange.startContainer, startRange.startOffset);
-    range.setEnd(focusRange.startContainer, focusRange.startOffset);
-  } else {
-    range.setStart(focusRange.startContainer, focusRange.startOffset);
-    range.setEnd(startRange.startContainer, startRange.startOffset);
-  }
-
-  return range.collapsed ? null : range;
-}
-
-function getPreviewSelectionRects(container: HTMLElement, range: Range): PreviewSelectionRect[] {
-  const containerBox = container.getBoundingClientRect();
-  const rects = Array.from(range.getClientRects());
-
-  return rects
-    .filter((rect) => rect.width > 0 && rect.height > 0)
-    .map((rect) => ({
-      left: rect.left - containerBox.left,
-      top: rect.top - containerBox.top,
-      width: rect.width,
-      height: rect.height,
-    }));
-}
-
 async function writePreviewSelectionToClipboard(text: string) {
   try {
     await invoke("copy_text_to_clipboard", { text });
@@ -718,7 +519,6 @@ export function NoteEditor() {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [editTitle, setEditTitle] = useState(false);
-  const [previewSelectionRects, setPreviewSelectionRects] = useState<PreviewSelectionRect[]>([]);
   const syncedNoteIdRef = useRef<string | null>(null);
   const contentDirtyRef = useRef(false);
   const titleDirtyRef = useRef(false);
@@ -728,8 +528,6 @@ export function NoteEditor() {
   const pasteLockRef = useRef(false);
   const deleteInFlightRef = useRef(false);
   const previewRef = useRef<HTMLDivElement>(null);
-  const previewSelectionDragRef = useRef<PreviewSelectionDrag | null>(null);
-  const previewSelectionTextRef = useRef("");
   const debouncedContent = useDebounce(content, 500);
   const debouncedTitle = useDebounce(title, 500);
 
@@ -737,150 +535,8 @@ export function NoteEditor() {
     contentRef.current = content;
   }, [content]);
 
-  const clearPreviewSelection = useCallback(() => {
-    previewSelectionDragRef.current = null;
-    previewSelectionTextRef.current = "";
-    setPreviewSelectionRects([]);
-    window.getSelection()?.removeAllRanges();
-  }, []);
-
   useEffect(() => {
-    clearPreviewSelection();
-  }, [activeNoteId, clearPreviewSelection, content, title]);
-
-  const updatePreviewSelection = useCallback((startRange: Range, focusRange: Range) => {
-    const container = previewRef.current;
-    if (!container) return false;
-
-    const range = createOrderedPreviewRange(container, startRange, focusRange);
-    if (!range) {
-      previewSelectionTextRef.current = "";
-      setPreviewSelectionRects([]);
-      return false;
-    }
-
-    const text = range.toString();
-    previewSelectionTextRef.current = text;
-    setPreviewSelectionRects(getPreviewSelectionRects(container, range));
-
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    return Boolean(text);
-  }, []);
-
-  const handlePreviewPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    if (
-      event.button !== 0 ||
-      event.altKey ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.shiftKey ||
-      !isPreviewTextSelectionTarget(event.target)
-    ) {
-      return;
-    }
-
-    const container = previewRef.current;
-    if (!container) return;
-
-    const startRange = previewCaretRangeFromPoint(container, event.clientX, event.clientY);
-    if (!startRange) {
-      clearPreviewSelection();
-      return;
-    }
-
-    previewSelectionDragRef.current = {
-      pointerId: event.pointerId,
-      startRange: startRange.cloneRange(),
-      startX: event.clientX,
-      startY: event.clientY,
-      moved: false,
-    };
-    previewSelectionTextRef.current = "";
-    setPreviewSelectionRects([]);
-    window.getSelection()?.removeAllRanges();
-  }, [clearPreviewSelection]);
-
-  const handlePreviewKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") return;
-    if (event.key === "Escape") {
-      clearPreviewSelection();
-      return;
-    }
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
-      event.preventDefault();
-      const container = previewRef.current;
-      if (!container) return;
-      const contentContainer = container.querySelector<HTMLElement>("[data-preview-content]");
-      if (!contentContainer) return;
-      const range = document.createRange();
-      range.selectNodeContents(contentContainer);
-      previewSelectionTextRef.current = range.toString();
-      setPreviewSelectionRects(getPreviewSelectionRects(container, range));
-      const selection = window.getSelection();
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-    }
-  }, [clearPreviewSelection]);
-
-  useEffect(() => {
-    const handlePointerMove = (event: PointerEvent | MouseEvent) => {
-      const drag = previewSelectionDragRef.current;
-      const container = previewRef.current;
-      if (!drag || !container) return;
-      if ("pointerId" in event && drag.pointerId !== event.pointerId) return;
-
-      const focusRange = previewCaretRangeFromPoint(container, event.clientX, event.clientY);
-      if (!focusRange) return;
-
-      const deltaX = event.clientX - drag.startX;
-      const deltaY = event.clientY - drag.startY;
-      drag.moved ||= Math.hypot(deltaX, deltaY) > 2;
-      if (!drag.moved) return;
-
-      const startRange = drag.startRange.cloneRange();
-      const endRange = focusRange.cloneRange();
-      window.requestAnimationFrame(() => {
-        const nativeText = getPreviewSelectionText(container);
-        if (nativeText.trim()) {
-          previewSelectionTextRef.current = nativeText;
-          setPreviewSelectionRects([]);
-          return;
-        }
-        updatePreviewSelection(startRange, endRange);
-      });
-    };
-
-    const stopPreviewSelectionDrag = (event: PointerEvent | MouseEvent) => {
-      const drag = previewSelectionDragRef.current;
-      if (!drag) return;
-      if ("pointerId" in event && drag.pointerId !== event.pointerId) return;
-      if (!drag.moved) {
-        previewSelectionTextRef.current = "";
-        setPreviewSelectionRects([]);
-        window.getSelection()?.removeAllRanges();
-      }
-      previewSelectionDragRef.current = null;
-    };
-
-    document.addEventListener("pointermove", handlePointerMove, true);
-    document.addEventListener("pointerup", stopPreviewSelectionDrag, true);
-    document.addEventListener("pointercancel", stopPreviewSelectionDrag, true);
-    document.addEventListener("mousemove", handlePointerMove, true);
-    document.addEventListener("mouseup", stopPreviewSelectionDrag, true);
-    return () => {
-      document.removeEventListener("pointermove", handlePointerMove, true);
-      document.removeEventListener("pointerup", stopPreviewSelectionDrag, true);
-      document.removeEventListener("pointercancel", stopPreviewSelectionDrag, true);
-      document.removeEventListener("mousemove", handlePointerMove, true);
-      document.removeEventListener("mouseup", stopPreviewSelectionDrag, true);
-    };
-  }, [updatePreviewSelection]);
-
-  useEffect(() => {
-    const selectedPreviewText = () =>
-      previewSelectionTextRef.current || getPreviewSelectionText(previewRef.current);
+    const selectedPreviewText = () => getPreviewSelectionText(previewRef.current);
 
     const handleCopy = (event: ClipboardEvent) => {
       const text = selectedPreviewText();
@@ -1279,34 +935,16 @@ export function NoteEditor() {
           <div className="px-8 pt-6 pb-4 w-full">
             <div
               ref={previewRef}
-              className="note-preview relative max-w-[72ch] mx-auto"
+              className="note-preview max-w-[72ch] mx-auto"
               role="document"
               tabIndex={0}
               onDragStart={(event) => event.preventDefault()}
-              onKeyDown={handlePreviewKeyDown}
-              onPointerDownCapture={handlePreviewPointerDown}
             >
-              <div className="preview-selection-layer" aria-hidden="true">
-                {previewSelectionRects.map((rect, index) => (
-                  <span
-                    key={`${index}-${Math.round(rect.left)}-${Math.round(rect.top)}`}
-                    className="preview-selection-rect"
-                    style={{
-                      left: rect.left,
-                      top: rect.top,
-                      width: rect.width,
-                      height: rect.height,
-                    }}
-                  />
-                ))}
-              </div>
-              <div className="preview-content" data-preview-content>
-                <h1 className="text-[1.7rem] font-bold tracking-tight leading-tight text-foreground pb-2">
-                  {activeNote.title || "未命名笔记"}
-                </h1>
-                <div className="note-prose">
-                  <PreviewContent content={content} />
-                </div>
+              <h1 className="text-[1.7rem] font-bold tracking-tight leading-tight text-foreground pb-2">
+                {activeNote.title || "未命名笔记"}
+              </h1>
+              <div className="note-prose">
+                <PreviewContent content={content} />
               </div>
             </div>
           </div>
