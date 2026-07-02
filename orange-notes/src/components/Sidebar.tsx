@@ -46,7 +46,6 @@ function SyncSettingsSection() {
   const [username, setUsername] = useState(settings.username);
   const [password, setPassword] = useState(settings.password);
   const [testing, setTesting] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [showRegister, setShowRegister] = useState(false);
   const [regUsername, setRegUsername] = useState("");
   const [regPassword, setRegPassword] = useState("");
@@ -158,7 +157,7 @@ function SyncSettingsSection() {
           )}
           {authenticated ? "已连接" : "连接"}
         </Button>
-        <Button size="sm" onClick={handleSave} disabled={saving}>
+        <Button size="sm" onClick={handleSave}>
           <Save className="mr-1 h-3 w-3" />
           保存
         </Button>

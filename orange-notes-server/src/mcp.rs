@@ -477,7 +477,7 @@ fn ensure_folder(
         {
             return Ok(folder.id.clone());
         }
-        let folder = new_folder(folder_name);
+        let folder = new_folder(folder_name, next_root_folder_sort_order(state));
         let id = folder.id.clone();
         state.folders.push(folder);
         return Ok(id);
@@ -494,17 +494,28 @@ fn ensure_folder(
         return Ok(folder.id.clone());
     }
 
-    let folder = new_folder("笔记".to_string());
+    let folder = new_folder("笔记".to_string(), 0);
     let id = folder.id.clone();
     state.folders.push(folder);
     Ok(id)
 }
 
-fn new_folder(name: String) -> Folder {
+fn next_root_folder_sort_order(state: &NotebookState) -> i64 {
+    state
+        .folders
+        .iter()
+        .filter(|folder| folder.parent_id.is_none())
+        .map(|folder| folder.sort_order)
+        .max()
+        .unwrap_or(-1)
+        + 1
+}
+
+fn new_folder(name: String, sort_order: i64) -> Folder {
     Folder {
         id: generate_id(),
         name,
-        sort_order: 0,
+        sort_order,
         parent_id: None,
         updated_at: now_millis(),
     }
