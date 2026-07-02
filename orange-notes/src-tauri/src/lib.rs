@@ -12,8 +12,6 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use thiserror::Error;
 use uuid::Uuid;
 
-const ENCRYPTED_TEXT_PREFIX: &str = "orange-notes-e2ee:v1:";
-
 #[derive(Debug, Error)]
 enum AppError {
     #[error("database error: {0}")]
@@ -159,12 +157,6 @@ fn cleanup_unreferenced_images(
     let contents = stmt
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    if contents
-        .iter()
-        .any(|content| content.starts_with(ENCRYPTED_TEXT_PREFIX))
-    {
-        return Ok(Vec::new());
-    }
     for content in contents {
         referenced.extend(extract_image_file_names(&content));
     }
@@ -298,15 +290,7 @@ fn apply_remote_notebook(
     clear_changes: bool,
 ) -> Result<Vec<String>, AppError> {
     let mut conn = state.db.lock().expect("database mutex poisoned");
-    let encrypted_remote = remote_notes.iter().any(|note| {
-        note.title.starts_with(ENCRYPTED_TEXT_PREFIX)
-            || note.content.starts_with(ENCRYPTED_TEXT_PREFIX)
-    }) || remote_folders
-        .iter()
-        .any(|folder| folder.name.starts_with(ENCRYPTED_TEXT_PREFIX));
-    let previous_images = if encrypted_remote {
-        HashSet::new()
-    } else {
+    let previous_images = {
         let mut stmt = conn.prepare("SELECT content FROM notes")?;
         let contents = stmt
             .query_map([], |row| row.get::<_, String>(0))?
@@ -317,22 +301,19 @@ fn apply_remote_notebook(
         }
         images
     };
+
     let mut remote_images = HashSet::new();
-    if !encrypted_remote {
-        for note in &remote_notes {
-            remote_images.extend(extract_image_file_names(&note.content));
-        }
+    for note in &remote_notes {
+        remote_images.extend(extract_image_file_names(&note.content));
     }
     let removed_images = previous_images
         .difference(&remote_images)
         .cloned()
         .collect::<HashSet<_>>();
     let mut cleanup_candidates = removed_images;
-    if !encrypted_remote {
-        for file_name in local_image_file_names(&state.img_dir)? {
-            if !remote_images.contains(&file_name) {
-                cleanup_candidates.insert(file_name);
-            }
+    for file_name in local_image_file_names(&state.img_dir)? {
+        if !remote_images.contains(&file_name) {
+            cleanup_candidates.insert(file_name);
         }
     }
 

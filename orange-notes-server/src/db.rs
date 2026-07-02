@@ -48,26 +48,10 @@ pub struct NoteSummary {
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
-pub struct EncryptionMeta {
-    pub enabled: bool,
-    pub version: i64,
-    pub algorithm: String,
-    pub kdf: String,
-    pub salt: String,
-    pub iterations: i64,
-    pub key_check_iv: String,
-    pub key_check: String,
-    #[serde(default, skip_serializing)]
-    pub mcp_check: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct NotebookState {
     pub folders: Vec<Folder>,
     pub notes: Vec<Note>,
     pub version: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encryption: Option<EncryptionMeta>,
 }
 
 pub struct Database {
@@ -257,10 +241,6 @@ impl Database {
                 "DELETE FROM sync_meta WHERE user_id = ?1",
                 params![username.clone()],
             )?;
-            conn.execute(
-                "DELETE FROM encryption_meta WHERE user_id = ?1",
-                params![username.clone()],
-            )?;
             let deleted =
                 conn.execute("DELETE FROM users WHERE username = ?1", params![username])?;
             Ok(deleted > 0)
@@ -283,29 +263,6 @@ impl Database {
                 )
                 .optional()?
                 .unwrap_or(0);
-
-            let encryption = conn
-                .query_row(
-                    "SELECT enabled, version, algorithm, kdf, salt, iterations, key_check_iv, key_check, mcp_check
-                     FROM encryption_meta
-                     WHERE user_id = ?1",
-                    params![user_id.clone()],
-                    |row| {
-                        Ok(EncryptionMeta {
-                            enabled: row.get::<_, i64>(0)? != 0,
-                            version: row.get(1)?,
-                            algorithm: row.get(2)?,
-                            kdf: row.get(3)?,
-                            salt: row.get(4)?,
-                            iterations: row.get(5)?,
-                            key_check_iv: row.get(6)?,
-                            key_check: row.get(7)?,
-                            mcp_check: row.get(8)?,
-                        })
-                    },
-                )
-                .optional()?
-                .filter(|meta| meta.enabled);
 
             let folders = {
                 let mut stmt = conn.prepare(
@@ -349,94 +306,8 @@ impl Database {
                 folders,
                 notes,
                 version,
-                encryption,
             })
         }).await
-    }
-
-    pub async fn encryption_enabled(&self, user_id: &str) -> Result<bool, rusqlite::Error> {
-        let user_id = user_id.to_string();
-        self.conn(move |conn| {
-            let enabled = conn
-                .query_row(
-                    "SELECT enabled FROM encryption_meta WHERE user_id = ?1",
-                    params![user_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?
-                .unwrap_or(0);
-            Ok(enabled != 0)
-        })
-        .await
-    }
-
-    pub async fn get_encryption_meta(
-        &self,
-        user_id: &str,
-    ) -> Result<Option<EncryptionMeta>, rusqlite::Error> {
-        let user_id = user_id.to_string();
-        self.conn(move |conn| {
-            conn.query_row(
-                "SELECT enabled, version, algorithm, kdf, salt, iterations, key_check_iv, key_check, mcp_check
-                 FROM encryption_meta
-                 WHERE user_id = ?1",
-                params![user_id],
-                |row| {
-                    Ok(EncryptionMeta {
-                        enabled: row.get::<_, i64>(0)? != 0,
-                        version: row.get(1)?,
-                        algorithm: row.get(2)?,
-                        kdf: row.get(3)?,
-                        salt: row.get(4)?,
-                        iterations: row.get(5)?,
-                        key_check_iv: row.get(6)?,
-                        key_check: row.get(7)?,
-                        mcp_check: row.get(8)?,
-                    })
-                },
-            )
-            .optional()
-        })
-        .await
-    }
-
-    pub async fn update_encryption_mcp_check(
-        &self,
-        user_id: &str,
-        mcp_check: String,
-        encryption: &EncryptionMeta,
-    ) -> Result<bool, rusqlite::Error> {
-        let user_id = user_id.to_string();
-        let encryption = encryption.clone();
-        self.conn(move |conn| {
-            let changed = conn.execute(
-                "UPDATE encryption_meta
-                 SET mcp_check = ?2
-                 WHERE user_id = ?1
-                   AND enabled = ?3
-                   AND version = ?4
-                   AND algorithm = ?5
-                   AND kdf = ?6
-                   AND salt = ?7
-                   AND iterations = ?8
-                   AND key_check_iv = ?9
-                   AND key_check = ?10",
-                params![
-                    user_id,
-                    mcp_check,
-                    encryption.enabled as i64,
-                    encryption.version,
-                    encryption.algorithm,
-                    encryption.kdf,
-                    encryption.salt,
-                    encryption.iterations,
-                    encryption.key_check_iv,
-                    encryption.key_check,
-                ],
-            )?;
-            Ok(changed > 0)
-        })
-        .await
     }
 
     pub async fn list_notes_page(
@@ -672,8 +543,6 @@ impl Database {
 
             tx.execute("DELETE FROM notes WHERE user_id = ?1", params![user_id.clone()])?;
             tx.execute("DELETE FROM folders WHERE user_id = ?1", params![user_id.clone()])?;
-            let encryption = state.encryption.clone().filter(|meta| meta.enabled);
-            let encryption_enabled = encryption.is_some();
 
             let referenced_attachments = state
                 .notes
@@ -726,55 +595,12 @@ impl Database {
                 file_names
             };
             for file_name in existing_attachments {
-                if encryption_enabled || referenced_attachments.contains(&file_name) {
+                if referenced_attachments.contains(&file_name) {
                     continue;
                 }
                 tx.execute(
                     "DELETE FROM attachments WHERE user_id = ?1 AND file_name = ?2",
                     params![user_id.clone(), file_name],
-                )?;
-            }
-
-            if let Some(encryption) = encryption {
-                tx.execute(
-                    "INSERT INTO encryption_meta (user_id, enabled, version, algorithm, kdf, salt, iterations, key_check_iv, key_check)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                     ON CONFLICT(user_id) DO UPDATE SET
-                       enabled = excluded.enabled,
-                       version = excluded.version,
-                       algorithm = excluded.algorithm,
-                       kdf = excluded.kdf,
-                       salt = excluded.salt,
-                       iterations = excluded.iterations,
-                       key_check_iv = excluded.key_check_iv,
-                       key_check = excluded.key_check,
-                       mcp_check = CASE
-                         WHEN encryption_meta.version = excluded.version
-                           AND encryption_meta.algorithm = excluded.algorithm
-                           AND encryption_meta.kdf = excluded.kdf
-                           AND encryption_meta.salt = excluded.salt
-                           AND encryption_meta.iterations = excluded.iterations
-                           AND encryption_meta.key_check_iv = excluded.key_check_iv
-                           AND encryption_meta.key_check = excluded.key_check
-                         THEN encryption_meta.mcp_check
-                         ELSE NULL
-                       END",
-                    params![
-                        user_id.clone(),
-                        encryption.enabled as i64,
-                        encryption.version,
-                        encryption.algorithm,
-                        encryption.kdf,
-                        encryption.salt,
-                        encryption.iterations,
-                        encryption.key_check_iv,
-                        encryption.key_check,
-                    ],
-                )?;
-            } else {
-                tx.execute(
-                    "DELETE FROM encryption_meta WHERE user_id = ?1",
-                    params![user_id.clone()],
                 )?;
             }
 
@@ -844,25 +670,6 @@ impl Database {
     ) -> Result<Vec<(String, String)>, rusqlite::Error> {
         let user_id = user_id.to_string();
         self.conn(move |conn| {
-            let encryption_enabled = conn
-                .query_row(
-                    "SELECT enabled FROM encryption_meta WHERE user_id = ?1",
-                    params![user_id.clone()],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?
-                .unwrap_or(0)
-                != 0;
-            if encryption_enabled {
-                let mut stmt = conn.prepare(
-                    "SELECT file_name, mime FROM attachments WHERE user_id = ?1 ORDER BY file_name ASC",
-                )?;
-                let rows = stmt.query_map(params![user_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?;
-                return rows.collect::<Result<Vec<_>, _>>();
-            }
-
             let referenced = {
                 let mut stmt = conn.prepare("SELECT content FROM notes WHERE user_id = ?1")?;
                 let contents = stmt
@@ -980,20 +787,6 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           version INTEGER NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS encryption_meta (
-          user_id TEXT PRIMARY KEY,
-          enabled INTEGER NOT NULL,
-          version INTEGER NOT NULL,
-          algorithm TEXT NOT NULL,
-          kdf TEXT NOT NULL,
-          salt TEXT NOT NULL,
-          iterations INTEGER NOT NULL,
-          key_check_iv TEXT NOT NULL,
-          key_check TEXT NOT NULL,
-          mcp_check TEXT,
-          FOREIGN KEY(user_id) REFERENCES users(username) ON DELETE CASCADE
-        );
-
         CREATE TABLE IF NOT EXISTS mcp_tokens (
           user_id TEXT PRIMARY KEY,
           token TEXT NOT NULL UNIQUE,
@@ -1011,7 +804,6 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     )?;
     ensure_text_column(conn, "folders", "ai_permission", "'write'")?;
     ensure_text_column(conn, "notes", "ai_permission", "'write'")?;
-    ensure_nullable_text_column(conn, "encryption_meta", "mcp_check")?;
     Ok(())
 }
 
@@ -1034,23 +826,6 @@ fn ensure_text_column(
             ),
             [],
         )?;
-    }
-    Ok(())
-}
-
-fn ensure_nullable_text_column(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-) -> Result<(), rusqlite::Error> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let exists = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .any(|name| name == column);
-    if !exists {
-        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"), [])?;
     }
     Ok(())
 }

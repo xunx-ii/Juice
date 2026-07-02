@@ -8,12 +8,6 @@ import {
   notifyNoteImageAvailable,
   notifyNoteImagesDeleted,
 } from "@/lib/noteImageEvents";
-import {
-  cacheRemoteEncryptionMetadata,
-  decryptAttachmentBytes,
-  encryptAttachmentBytes,
-  getLocalEncryptionMetadata,
-} from "@/sync/encryption";
 
 const IMAGE_TOKEN_RE = /!\[\[([^\]\r\n]+)\]\]/g;
 const STORAGE_KEY = "orange-notes-sync-settings";
@@ -100,7 +94,6 @@ function referencedImagesFromRemoteState(message: RemoteStateMessage): Set<strin
 }
 
 function filterReferencedAttachments(message: RemoteStateMessage): RemoteAttachmentMeta[] {
-  if (message.state.encryption?.enabled) return message.attachments;
   const referenced = referencedImagesFromRemoteState(message);
   return message.attachments.filter((attachment) => referenced.has(attachment.file_name));
 }
@@ -162,13 +155,6 @@ async function mergeRejectedState(message: RemoteStateMessage) {
 async function applyIncomingState(message: RemoteStateMessage) {
   const noteStore = useNoteStore.getState();
   const localVersion = noteStore.syncVersion;
-  const localEncryption = getLocalEncryptionMetadata();
-  if (
-    message.state.encryption?.enabled &&
-    (message.state.version > localVersion || !localEncryption?.enabled)
-  ) {
-    cacheRemoteEncryptionMetadata(message.state.encryption);
-  }
 
   const store = useSyncStore.getState();
   if (message.state.version === 0 && localVersion === 0 && noteStore.hasContent()) {
@@ -346,8 +332,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
       try {
         const bytes = await invoke<number[]>("read_note_image_bytes", { fileName });
         if (!bytes.length) continue;
-        const encryptedBytes = await encryptAttachmentBytes(new Uint8Array(bytes));
-        const body = encryptedBytes.slice().buffer;
+        const body = new Uint8Array(bytes).slice().buffer;
 
         await fetch(
           `${httpBase}/api/sync/files/${encodeURIComponent(settings.username)}/${encodeURIComponent(fileName)}`,
@@ -364,7 +349,6 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   },
 
   cleanupLocalImages: async () => {
-    if (getLocalEncryptionMetadata()?.enabled) return;
     try {
       const deletedImages = await invoke<string[]>("cleanup_unreferenced_note_images");
       notifyNoteImagesDeleted(deletedImages);
@@ -386,10 +370,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
         throw new Error(`下载图片失败: ${response.status} ${response.statusText}`);
       }
 
-      const encryptedBytes = new Uint8Array(await response.arrayBuffer());
-      const bytes = Array.from(
-        await decryptAttachmentBytes(encryptedBytes, getLocalEncryptionMetadata())
-      );
+      const bytes = Array.from(new Uint8Array(await response.arrayBuffer()));
       await invoke("save_synced_image", { fileName, mime, bytes });
       notifyNoteImageAvailable(fileName);
       set({ lastError: null });

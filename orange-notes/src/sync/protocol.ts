@@ -2,32 +2,6 @@
 
 import type { AiPermission } from "@/types/note";
 
-export interface RemoteEncryptionMeta {
-  enabled: boolean;
-  version: number;
-  algorithm: "AES-GCM";
-  kdf: "PBKDF2-SHA256";
-  salt: string;
-  iterations: number;
-  key_check_iv: string;
-  key_check: string;
-}
-
-export function isRemoteEncryptionMeta(value: unknown): value is RemoteEncryptionMeta {
-  const candidate = value as Partial<RemoteEncryptionMeta> | null;
-  return Boolean(
-    candidate &&
-      candidate.enabled === true &&
-      candidate.version === 1 &&
-      candidate.algorithm === "AES-GCM" &&
-      candidate.kdf === "PBKDF2-SHA256" &&
-      typeof candidate.salt === "string" &&
-      typeof candidate.iterations === "number" &&
-      typeof candidate.key_check_iv === "string" &&
-      typeof candidate.key_check === "string"
-  );
-}
-
 export interface RemoteFolder {
   id: string;
   name: string;
@@ -54,7 +28,6 @@ export interface RemoteNotebookState {
   folders: RemoteFolder[];
   notes: RemoteNote[];
   version: number;
-  encryption?: RemoteEncryptionMeta | null;
 }
 
 export type ClientMessage =

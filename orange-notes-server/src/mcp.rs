@@ -1,7 +1,3 @@
-use aes_gcm::{
-    aead::{Aead, KeyInit},
-    Aes256Gcm, Nonce,
-};
 use axum::{
     body::Bytes,
     extract::{Path, Query, State},
@@ -9,19 +5,14 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use pbkdf2::pbkdf2_hmac;
-use rand_core::{OsRng, RngCore};
-use serde::Deserialize;
 use serde_json::{json, Value};
-use sha2::Sha256;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{
     auth,
-    db::{Database, EncryptionMeta, Folder, Note, NoteSummary, NotebookState},
+    db::{Database, Folder, Note, NoteSummary, NotebookState},
     sync::{self, ClientMap},
 };
 
@@ -33,25 +24,6 @@ const NOTE_PREVIEW_CHARS: i64 = 240;
 const SYNC_AUTH_HEADER: &str = "x-orange-notes-auth";
 const SYNC_USER_HEADER: &str = "x-orange-notes-user";
 const SYNC_PASSWORD_HEADER: &str = "x-orange-notes-password";
-const E2EE_KEY_HEADER: &str = "x-orange-notes-e2ee-key";
-const PAYLOAD_PREFIX: &str = "orange-notes-e2ee:v1:";
-const CLIENT_KEY_CHECK_TEXT: &str = "orange-notes-key-check";
-const MCP_KEY_CHECK_TEXT: &str = "hello";
-
-#[derive(Debug, Deserialize)]
-pub struct E2eeCheckRequest {
-    encryption: EncryptionMeta,
-    check: String,
-}
-
-struct McpCrypto {
-    key: [u8; 32],
-}
-
-enum McpAccess {
-    Plain,
-    Encrypted(McpCrypto),
-}
 
 pub async fn get_token(
     Path(username): Path<String>,
@@ -74,69 +46,6 @@ pub async fn generate_token(
         .await
         .map_err(database_error)?;
     Ok(Json(json!({ "token": token })))
-}
-
-pub async fn store_e2ee_check(
-    Path(username): Path<String>,
-    headers: HeaderMap,
-    State(db): State<Arc<Database>>,
-    Json(request): Json<E2eeCheckRequest>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    require_sync_auth(&headers, db.as_ref(), &username).await?;
-    let key = decode_e2ee_key_header(&required_header(&headers, E2EE_KEY_HEADER)?)
-        .map_err(|message| (StatusCode::UNAUTHORIZED, message))?;
-    let encryption = db
-        .get_encryption_meta(&username)
-        .await
-        .map_err(database_error)?
-        .filter(|meta| meta.enabled)
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "请先同步端到端加密状态".to_string(),
-            )
-        })?;
-    if !same_encryption_settings(&request.encryption, &encryption) {
-        return Err((
-            StatusCode::CONFLICT,
-            "请先同步最新端到端加密状态".to_string(),
-        ));
-    }
-
-    let crypto = crypto_from_passphrase(&encryption, &key)
-        .map_err(|message| (StatusCode::UNAUTHORIZED, message))?;
-    verify_client_key_check(&encryption, &crypto)
-        .map_err(|message| (StatusCode::UNAUTHORIZED, message))?;
-    verify_mcp_check_payload(&request.check, &crypto)
-        .map_err(|message| (StatusCode::UNAUTHORIZED, message))?;
-
-    let updated = db
-        .update_encryption_mcp_check(&username, request.check, &encryption)
-        .await
-        .map_err(database_error)?;
-    if !updated {
-        return Err((
-            StatusCode::CONFLICT,
-            "端到端加密状态已变化，请重新同步后再更新密钥".to_string(),
-        ));
-    }
-    Ok(Json(json!({ "valid": true })))
-}
-
-pub async fn verify_e2ee_check(
-    Path(username): Path<String>,
-    headers: HeaderMap,
-    State(db): State<Arc<Database>>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    require_sync_auth(&headers, db.as_ref(), &username).await?;
-    McpAccess::for_user(
-        db.as_ref(),
-        &username,
-        header_value(&headers, E2EE_KEY_HEADER),
-    )
-    .await
-    .map_err(|message| (StatusCode::UNAUTHORIZED, message))?;
-    Ok(Json(json!({ "valid": true })))
 }
 
 pub async fn mcp_info() -> impl IntoResponse {
@@ -236,7 +145,7 @@ async fn call_tool(
     db: &Database,
     clients: &ClientMap,
     user_id: &str,
-    headers: &HeaderMap,
+    _headers: &HeaderMap,
     message: &Value,
 ) -> Result<Value, String> {
     let params = message
@@ -256,15 +165,13 @@ async fn call_tool(
         Some(_) => return Err("tool arguments must be an object".to_string()),
     };
 
-    let access = McpAccess::for_user(db, user_id, header_value(headers, E2EE_KEY_HEADER)).await?;
-
     let (result, changed) = match name {
-        "list_folders" => (list_folders(db, user_id, &access).await?, false),
-        "list_notes" => (list_notes(db, user_id, &access, &arguments).await?, false),
-        "get_note" => (get_note(db, user_id, &access, &arguments).await?, false),
-        "create_note" => (create_note(db, user_id, &access, &arguments).await?, true),
-        "update_note" => (update_note(db, user_id, &access, &arguments).await?, true),
-        "delete_note" => (delete_note(db, user_id, &access, &arguments).await?, true),
+        "list_folders" => (list_folders(db, user_id).await?, false),
+        "list_notes" => (list_notes(db, user_id, &arguments).await?, false),
+        "get_note" => (get_note(db, user_id, &arguments).await?, false),
+        "create_note" => (create_note(db, user_id, &arguments).await?, true),
+        "update_note" => (update_note(db, user_id, &arguments).await?, true),
+        "delete_note" => (delete_note(db, user_id, &arguments).await?, true),
         _ => return Err(format!("unknown tool: {name}")),
     };
 
@@ -384,12 +291,11 @@ fn tools() -> Value {
     ])
 }
 
-async fn list_folders(db: &Database, user_id: &str, access: &McpAccess) -> Result<Value, String> {
-    let mut folders = db
+async fn list_folders(db: &Database, user_id: &str) -> Result<Value, String> {
+    let folders = db
         .list_folders(user_id)
         .await
         .map_err(|error| format!("database error: {error}"))?;
-    access.decrypt_folders(&mut folders)?;
     let readable_folders = readable_folder_ids(&folders);
     let folders = folders
         .into_iter()
@@ -401,7 +307,6 @@ async fn list_folders(db: &Database, user_id: &str, access: &McpAccess) -> Resul
 async fn list_notes(
     db: &Database,
     user_id: &str,
-    access: &McpAccess,
     arguments: &Value,
 ) -> Result<Value, String> {
     let folder_id = string_arg(arguments, &["folderId", "folder_id"])
@@ -416,20 +321,6 @@ async fn list_notes(
         .unwrap_or(DEFAULT_NOTE_LIST_LIMIT)
         .clamp(1, MAX_NOTE_LIST_LIMIT);
     let offset = i64_arg(arguments, &["offset"]).unwrap_or(0).max(0);
-
-    if matches!(access, McpAccess::Encrypted(_)) {
-        return list_notes_encrypted(
-            db,
-            user_id,
-            access,
-            folder_id,
-            query,
-            include_content_requested,
-            limit,
-            offset,
-        )
-        .await;
-    }
 
     let folders = db
         .list_folders(user_id)
@@ -500,94 +391,13 @@ async fn list_notes(
     }))
 }
 
-async fn list_notes_encrypted(
-    db: &Database,
-    user_id: &str,
-    access: &McpAccess,
-    folder_id: Option<String>,
-    query: Option<String>,
-    include_content_requested: bool,
-    limit: i64,
-    offset: i64,
-) -> Result<Value, String> {
-    let folders = db
-        .list_folders(user_id)
-        .await
-        .map_err(|error| format!("database error: {error}"))?;
-    let readable_folders = readable_folder_ids(&folders);
-    if let Some(folder_id) = folder_id.as_ref() {
-        if !readable_folders.contains(folder_id) {
-            return Ok(json!({
-                "notes": [],
-                "limit": limit,
-                "offset": offset,
-                "hasMore": false,
-                "contentIncluded": false,
-                "includeContentIgnored": include_content_requested
-            }));
-        }
-    }
-
-    let query = query.map(|value| value.to_lowercase());
-    let mut db_offset = 0;
-    let mut visible_seen = 0;
-    let mut selected = Vec::new();
-    loop {
-        let mut batch = db
-            .list_notes_page(user_id, folder_id.clone(), MAX_NOTE_LIST_LIMIT, db_offset)
-            .await
-            .map_err(|error| format!("database error: {error}"))?;
-        if batch.is_empty() {
-            break;
-        }
-        let batch_len = batch.len() as i64;
-        access.decrypt_notes(&mut batch)?;
-        for note in batch {
-            if !readable_folders.contains(&note.folder) || !can_read(&note.ai_permission) {
-                continue;
-            }
-            if let Some(query) = query.as_ref() {
-                let haystack = format!("{}\n{}", note.title, note.content).to_lowercase();
-                if !haystack.contains(query) {
-                    continue;
-                }
-            }
-            if visible_seen >= offset && selected.len() < limit.saturating_add(1) as usize {
-                selected.push(note_summary_from_note(note));
-            }
-            visible_seen += 1;
-        }
-        if batch_len < MAX_NOTE_LIST_LIMIT || selected.len() > limit as usize {
-            break;
-        }
-        db_offset += batch_len;
-    }
-
-    let has_more = selected.len() > limit as usize;
-    let notes = selected
-        .into_iter()
-        .take(limit as usize)
-        .map(note_summary_value)
-        .collect::<Vec<_>>();
-
-    Ok(json!({
-        "notes": notes,
-        "limit": limit,
-        "offset": offset,
-        "hasMore": has_more,
-        "contentIncluded": false,
-        "includeContentIgnored": include_content_requested
-    }))
-}
-
 async fn get_note(
     db: &Database,
     user_id: &str,
-    access: &McpAccess,
     arguments: &Value,
 ) -> Result<Value, String> {
     let id = required_string(arguments, &["id"])?;
-    let mut note = db
+    let note = db
         .get_note_by_id(user_id, &id)
         .await
         .map_err(|error| format!("database error: {error}"))?
@@ -597,27 +407,7 @@ async fn get_note(
         .await
         .map_err(|error| format!("database error: {error}"))?;
     ensure_note_readable_from_folders(&note, &folders)?;
-    access.decrypt_note(&mut note)?;
     Ok(json!(note))
-}
-
-fn note_summary_from_note(note: Note) -> NoteSummary {
-    NoteSummary {
-        id: note.id,
-        title: note.title,
-        folder: note.folder,
-        created_at: note.created_at,
-        updated_at: note.updated_at,
-        sort_order: note.sort_order,
-        pinned: note.pinned,
-        favorite: note.favorite,
-        content_preview: note
-            .content
-            .chars()
-            .take(NOTE_PREVIEW_CHARS as usize)
-            .collect(),
-        ai_permission: note.ai_permission,
-    }
 }
 
 fn note_summary_value(note: NoteSummary) -> Value {
@@ -638,11 +428,9 @@ fn note_summary_value(note: NoteSummary) -> Value {
 async fn create_note(
     db: &Database,
     user_id: &str,
-    access: &McpAccess,
     arguments: &Value,
 ) -> Result<Value, String> {
     let mut state = get_state(db, user_id).await?;
-    access.decrypt_state(&mut state)?;
     let base_version = state.version;
     let folder_id = ensure_folder(
         &mut state,
@@ -674,7 +462,6 @@ async fn create_note(
         ai_permission: "write".to_string(),
     };
     state.notes.push(note.clone());
-    access.encrypt_state(&mut state)?;
     let version = save_state(db, user_id, state, base_version).await?;
     Ok(json!({ "note": note, "version": version }))
 }
@@ -682,12 +469,10 @@ async fn create_note(
 async fn update_note(
     db: &Database,
     user_id: &str,
-    access: &McpAccess,
     arguments: &Value,
 ) -> Result<Value, String> {
     let id = required_string(arguments, &["id"])?;
     let mut state = get_state(db, user_id).await?;
-    access.decrypt_state(&mut state)?;
     let base_version = state.version;
     let note_index = state
         .notes
@@ -727,7 +512,6 @@ async fn update_note(
     note.folder = folder;
     note.updated_at = now_millis();
     let updated = note.clone();
-    access.encrypt_state(&mut state)?;
     let version = save_state(db, user_id, state, base_version).await?;
     Ok(json!({ "note": updated, "version": version }))
 }
@@ -735,12 +519,10 @@ async fn update_note(
 async fn delete_note(
     db: &Database,
     user_id: &str,
-    access: &McpAccess,
     arguments: &Value,
 ) -> Result<Value, String> {
     let id = required_string(arguments, &["id"])?;
     let mut state = get_state(db, user_id).await?;
-    access.decrypt_state(&mut state)?;
     let base_version = state.version;
     let note = state
         .notes
@@ -753,7 +535,6 @@ async fn delete_note(
     if state.notes.len() == before {
         return Err(format!("note not found: {id}"));
     }
-    access.encrypt_state(&mut state)?;
     let version = save_state(db, user_id, state, base_version).await?;
     Ok(json!({ "id": id, "deleted": true, "version": version }))
 }
@@ -907,234 +688,6 @@ fn folder_allows(folders: &[Folder], folder_id: &str, predicate: fn(&str) -> boo
         current = folder.parent_id.as_deref();
     }
     true
-}
-
-impl McpAccess {
-    async fn for_user(
-        db: &Database,
-        user_id: &str,
-        passphrase: Option<&str>,
-    ) -> Result<Self, String> {
-        let Some(meta) = db
-            .get_encryption_meta(user_id)
-            .await
-            .map_err(|error| format!("database error: {error}"))?
-            .filter(|meta| meta.enabled)
-        else {
-            return Ok(Self::Plain);
-        };
-
-        let passphrase = passphrase.ok_or_else(|| {
-            "笔记已开启端到端加密，请在请求头 x-orange-notes-e2ee-key 中提供密钥".to_string()
-        })?;
-        let passphrase = decode_e2ee_key_header(passphrase)?;
-        let crypto = crypto_from_passphrase(&meta, &passphrase)?;
-        verify_client_key_check(&meta, &crypto)?;
-        verify_stored_mcp_check(&meta, &crypto)?;
-        Ok(Self::Encrypted(crypto))
-    }
-
-    fn decrypt_state(&self, state: &mut NotebookState) -> Result<(), String> {
-        if state
-            .encryption
-            .as_ref()
-            .map(|meta| meta.enabled)
-            .unwrap_or(false)
-        {
-            let Self::Encrypted(crypto) = self else {
-                return Err("笔记已开启端到端加密，请提供密钥".to_string());
-            };
-            crypto.decrypt_folders(&mut state.folders)?;
-            crypto.decrypt_notes(&mut state.notes)?;
-        }
-        Ok(())
-    }
-
-    fn encrypt_state(&self, state: &mut NotebookState) -> Result<(), String> {
-        if state
-            .encryption
-            .as_ref()
-            .map(|meta| meta.enabled)
-            .unwrap_or(false)
-        {
-            let Self::Encrypted(crypto) = self else {
-                return Err("笔记已开启端到端加密，请提供密钥".to_string());
-            };
-            crypto.encrypt_folders(&mut state.folders)?;
-            crypto.encrypt_notes(&mut state.notes)?;
-        }
-        Ok(())
-    }
-
-    fn decrypt_folders(&self, folders: &mut [Folder]) -> Result<(), String> {
-        if let Self::Encrypted(crypto) = self {
-            crypto.decrypt_folders(folders)?;
-        }
-        Ok(())
-    }
-
-    fn decrypt_note(&self, note: &mut Note) -> Result<(), String> {
-        if let Self::Encrypted(crypto) = self {
-            crypto.decrypt_note(note)?;
-        }
-        Ok(())
-    }
-
-    fn decrypt_notes(&self, notes: &mut [Note]) -> Result<(), String> {
-        if let Self::Encrypted(crypto) = self {
-            crypto.decrypt_notes(notes)?;
-        }
-        Ok(())
-    }
-}
-
-impl McpCrypto {
-    fn cipher(&self) -> Result<Aes256Gcm, String> {
-        Aes256Gcm::new_from_slice(&self.key).map_err(|_| "端到端密钥初始化失败".to_string())
-    }
-
-    fn decrypt_text(&self, value: &str) -> Result<String, String> {
-        if !value.starts_with(PAYLOAD_PREFIX) {
-            return Ok(value.to_string());
-        }
-        let payload = &value[PAYLOAD_PREFIX.len()..];
-        let (iv, ciphertext) = payload
-            .split_once(':')
-            .ok_or_else(|| "加密数据格式错误".to_string())?;
-        decrypt_payload(&self.cipher()?, iv, ciphertext)
-    }
-
-    fn encrypt_text(&self, value: &str) -> Result<String, String> {
-        let (iv, ciphertext) = encrypt_payload(&self.cipher()?, value)?;
-        Ok(format!("{PAYLOAD_PREFIX}{iv}:{ciphertext}"))
-    }
-
-    fn decrypt_folders(&self, folders: &mut [Folder]) -> Result<(), String> {
-        for folder in folders {
-            folder.name = self.decrypt_text(&folder.name)?;
-        }
-        Ok(())
-    }
-
-    fn encrypt_folders(&self, folders: &mut [Folder]) -> Result<(), String> {
-        for folder in folders {
-            folder.name = self.encrypt_text(&folder.name)?;
-        }
-        Ok(())
-    }
-
-    fn decrypt_note(&self, note: &mut Note) -> Result<(), String> {
-        note.title = self.decrypt_text(&note.title)?;
-        note.content = self.decrypt_text(&note.content)?;
-        Ok(())
-    }
-
-    fn decrypt_notes(&self, notes: &mut [Note]) -> Result<(), String> {
-        for note in notes {
-            self.decrypt_note(note)?;
-        }
-        Ok(())
-    }
-
-    fn encrypt_notes(&self, notes: &mut [Note]) -> Result<(), String> {
-        for note in notes {
-            note.title = self.encrypt_text(&note.title)?;
-            note.content = self.encrypt_text(&note.content)?;
-        }
-        Ok(())
-    }
-}
-
-fn crypto_from_passphrase(meta: &EncryptionMeta, passphrase: &str) -> Result<McpCrypto, String> {
-    if meta.version != 1 || meta.algorithm != "AES-GCM" || meta.kdf != "PBKDF2-SHA256" {
-        return Err("端到端加密参数不受支持".to_string());
-    }
-    if meta.iterations <= 0 || meta.iterations > u32::MAX as i64 {
-        return Err("端到端加密参数无效".to_string());
-    }
-    let salt = BASE64
-        .decode(meta.salt.as_bytes())
-        .map_err(|_| "端到端加密参数无效".to_string())?;
-    let mut key = [0_u8; 32];
-    pbkdf2_hmac::<Sha256>(
-        passphrase.as_bytes(),
-        &salt,
-        meta.iterations as u32,
-        &mut key,
-    );
-    Ok(McpCrypto { key })
-}
-
-fn same_encryption_settings(a: &EncryptionMeta, b: &EncryptionMeta) -> bool {
-    a.enabled == b.enabled
-        && a.version == b.version
-        && a.algorithm == b.algorithm
-        && a.kdf == b.kdf
-        && a.salt == b.salt
-        && a.iterations == b.iterations
-        && a.key_check_iv == b.key_check_iv
-        && a.key_check == b.key_check
-}
-
-fn decode_e2ee_key_header(value: &str) -> Result<String, String> {
-    percent_encoding::percent_decode_str(value)
-        .decode_utf8()
-        .map(|value| value.into_owned())
-        .map_err(|_| "端到端密钥请求头格式错误".to_string())
-}
-
-fn verify_client_key_check(meta: &EncryptionMeta, crypto: &McpCrypto) -> Result<(), String> {
-    let text = decrypt_payload(&crypto.cipher()?, &meta.key_check_iv, &meta.key_check)?;
-    if text == CLIENT_KEY_CHECK_TEXT {
-        Ok(())
-    } else {
-        Err("端到端密钥不正确".to_string())
-    }
-}
-
-fn verify_mcp_check_payload(payload: &str, crypto: &McpCrypto) -> Result<(), String> {
-    if !payload.starts_with(PAYLOAD_PREFIX) {
-        return Err("端到端密钥校验数据格式错误".to_string());
-    }
-    let text = crypto.decrypt_text(payload)?;
-    if text == MCP_KEY_CHECK_TEXT {
-        Ok(())
-    } else {
-        Err("端到端密钥校验失败".to_string())
-    }
-}
-
-fn verify_stored_mcp_check(meta: &EncryptionMeta, crypto: &McpCrypto) -> Result<(), String> {
-    let check = meta
-        .mcp_check
-        .as_deref()
-        .ok_or_else(|| "服务器尚未保存端到端密钥校验，请先在客户端设置中更新密钥".to_string())?;
-    verify_mcp_check_payload(check, crypto)
-}
-
-fn decrypt_payload(cipher: &Aes256Gcm, iv: &str, ciphertext: &str) -> Result<String, String> {
-    let iv = BASE64
-        .decode(iv.as_bytes())
-        .map_err(|_| "加密数据格式错误".to_string())?;
-    if iv.len() != 12 {
-        return Err("加密数据格式错误".to_string());
-    }
-    let ciphertext = BASE64
-        .decode(ciphertext.as_bytes())
-        .map_err(|_| "加密数据格式错误".to_string())?;
-    let plaintext = cipher
-        .decrypt(Nonce::from_slice(&iv), ciphertext.as_ref())
-        .map_err(|_| "端到端密钥不正确或加密数据已损坏".to_string())?;
-    String::from_utf8(plaintext).map_err(|_| "加密数据格式错误".to_string())
-}
-
-fn encrypt_payload(cipher: &Aes256Gcm, text: &str) -> Result<(String, String), String> {
-    let mut iv = [0_u8; 12];
-    OsRng.fill_bytes(&mut iv);
-    let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&iv), text.as_bytes())
-        .map_err(|_| "加密数据失败".to_string())?;
-    Ok((BASE64.encode(iv), BASE64.encode(ciphertext)))
 }
 
 async fn require_sync_auth(

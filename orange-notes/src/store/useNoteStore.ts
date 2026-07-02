@@ -2,7 +2,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import type { AiPermission, Folder, Note } from "@/types/note";
 import type { RemoteNotebookState } from "@/sync/protocol";
-import { decryptNotebookState, encryptNotebookState, getLocalEncryptionMetadata } from "@/sync/encryption";
 import { useSyncStore } from "@/sync/useSyncStore";
 import { notifyNoteImagesDeleted } from "@/lib/noteImageEvents";
 
@@ -168,7 +167,6 @@ function localToPayload(
       ai_permission: n.aiPermission,
     })),
     version,
-    encryption: getLocalEncryptionMetadata(),
   };
 }
 
@@ -548,16 +546,15 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
 
   getSyncPayload: async (): Promise<RemoteNotebookState> => {
     const { folders, notes } = get();
-    return encryptNotebookState(localToPayload(folders, notes, Date.now()));
+    return localToPayload(folders, notes, Date.now());
   },
 
   applyRemoteChanges: async (state: RemoteNotebookState) => {
-    const decryptedState = await decryptNotebookState(state);
-    const { folders, notes } = payloadToLocal(decryptedState);
+    const { folders, notes } = payloadToLocal(state);
 
     const deletedImages = await invoke<string[]>("apply_remote_notebook", {
-      remoteFolders: decryptedState.folders,
-      remoteNotes: decryptedState.notes,
+      remoteFolders: state.folders,
+      remoteNotes: state.notes,
       version: state.version,
       clearChanges: true,
     });
@@ -578,8 +575,7 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
   },
 
   mergeRemoteSnapshot: async (state: RemoteNotebookState) => {
-    const decryptedState = await decryptNotebookState(state);
-    const remote = payloadToLocal(decryptedState);
+    const remote = payloadToLocal(state);
     const local = get();
     const foldersById = new Map<string, Folder>();
     for (const folder of remote.folders) foldersById.set(folder.id, folder);

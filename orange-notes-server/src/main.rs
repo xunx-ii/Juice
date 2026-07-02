@@ -91,14 +91,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/sync/mcp-token/:username", get(mcp::get_token))
         .route("/api/sync/mcp-token/:username", post(mcp::generate_token))
-        .route(
-            "/api/sync/e2ee-check/:username",
-            post(mcp::store_e2ee_check),
-        )
-        .route(
-            "/api/sync/e2ee-check/:username/verify",
-            post(mcp::verify_e2ee_check),
-        )
         .route("/mcp", get(mcp::mcp_info))
         .route("/mcp", post(mcp::mcp_handler))
         // WebSocket sync
