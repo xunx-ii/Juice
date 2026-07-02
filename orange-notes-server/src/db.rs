@@ -26,6 +26,19 @@ pub struct Note {
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct NoteSummary {
+    pub id: String,
+    pub title: String,
+    pub folder: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub sort_order: i64,
+    pub pinned: bool,
+    pub favorite: bool,
+    pub content_preview: String,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct NotebookState {
     pub folders: Vec<Folder>,
     pub notes: Vec<Note>,
@@ -277,6 +290,124 @@ impl Database {
                 version,
             })
         }).await
+    }
+
+    pub async fn list_note_summaries(
+        &self,
+        user_id: &str,
+        folder_id: Option<String>,
+        query: Option<String>,
+        limit: i64,
+        offset: i64,
+        preview_chars: i64,
+    ) -> Result<Vec<NoteSummary>, rusqlite::Error> {
+        let user_id = user_id.to_string();
+        let query = query.map(|value| format!("%{}%", value.to_lowercase()));
+        self.conn(move |conn| {
+            let map_row = |row: &rusqlite::Row<'_>| {
+                Ok(NoteSummary {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    folder: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    sort_order: row.get(5)?,
+                    pinned: row.get::<_, i64>(6)? != 0,
+                    favorite: row.get::<_, i64>(7)? != 0,
+                    content_preview: row.get(8)?,
+                })
+            };
+
+            match (folder_id, query) {
+                (Some(folder_id), Some(query)) => {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, title, folder, created_at, updated_at, sort_order, pinned, favorite, substr(content, 1, ?3)
+                         FROM notes
+                         WHERE user_id = ?1 AND folder = ?2 AND (lower(title) LIKE ?4 OR lower(content) LIKE ?4)
+                         ORDER BY folder ASC, sort_order ASC
+                         LIMIT ?5 OFFSET ?6",
+                    )?;
+                    let rows = stmt.query_map(
+                        params![user_id, folder_id, preview_chars, query, limit, offset],
+                        map_row,
+                    )?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                }
+                (Some(folder_id), None) => {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, title, folder, created_at, updated_at, sort_order, pinned, favorite, substr(content, 1, ?3)
+                         FROM notes
+                         WHERE user_id = ?1 AND folder = ?2
+                         ORDER BY folder ASC, sort_order ASC
+                         LIMIT ?4 OFFSET ?5",
+                    )?;
+                    let rows = stmt.query_map(
+                        params![user_id, folder_id, preview_chars, limit, offset],
+                        map_row,
+                    )?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                }
+                (None, Some(query)) => {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, title, folder, created_at, updated_at, sort_order, pinned, favorite, substr(content, 1, ?2)
+                         FROM notes
+                         WHERE user_id = ?1 AND (lower(title) LIKE ?3 OR lower(content) LIKE ?3)
+                         ORDER BY folder ASC, sort_order ASC
+                         LIMIT ?4 OFFSET ?5",
+                    )?;
+                    let rows = stmt.query_map(
+                        params![user_id, preview_chars, query, limit, offset],
+                        map_row,
+                    )?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                }
+                (None, None) => {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, title, folder, created_at, updated_at, sort_order, pinned, favorite, substr(content, 1, ?2)
+                         FROM notes
+                         WHERE user_id = ?1
+                         ORDER BY folder ASC, sort_order ASC
+                         LIMIT ?3 OFFSET ?4",
+                    )?;
+                    let rows =
+                        stmt.query_map(params![user_id, preview_chars, limit, offset], map_row)?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                }
+            }
+        })
+        .await
+    }
+
+    pub async fn get_note_by_id(
+        &self,
+        user_id: &str,
+        note_id: &str,
+    ) -> Result<Option<Note>, rusqlite::Error> {
+        let user_id = user_id.to_string();
+        let note_id = note_id.to_string();
+        self.conn(move |conn| {
+            conn.query_row(
+                "SELECT id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite
+                 FROM notes
+                 WHERE user_id = ?1 AND id = ?2",
+                params![user_id, note_id],
+                |row| {
+                    Ok(Note {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        content: row.get(2)?,
+                        folder: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                        sort_order: row.get(6)?,
+                        pinned: row.get::<_, i64>(7)? != 0,
+                        favorite: row.get::<_, i64>(8)? != 0,
+                    })
+                },
+            )
+            .optional()
+        })
+        .await
     }
 
     // -----------------------------------------------------------------------
@@ -562,6 +693,12 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           updated_at INTEGER NOT NULL,
           FOREIGN KEY(user_id) REFERENCES users(username) ON DELETE CASCADE
         );
+
+        CREATE INDEX IF NOT EXISTS idx_notes_user_folder_sort
+          ON notes(user_id, folder, sort_order);
+
+        CREATE INDEX IF NOT EXISTS idx_notes_user_updated
+          ON notes(user_id, updated_at);
     ",
     )
 }

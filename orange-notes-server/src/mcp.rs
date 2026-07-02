@@ -12,12 +12,15 @@ use uuid::Uuid;
 
 use crate::{
     auth,
-    db::{Database, Folder, Note, NotebookState},
+    db::{Database, Folder, Note, NoteSummary, NotebookState},
     sync::{self, ClientMap},
 };
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MCP_SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+const DEFAULT_NOTE_LIST_LIMIT: i64 = 50;
+const MAX_NOTE_LIST_LIMIT: i64 = 200;
+const NOTE_PREVIEW_CHARS: i64 = 240;
 const SYNC_AUTH_HEADER: &str = "x-orange-notes-auth";
 const SYNC_USER_HEADER: &str = "x-orange-notes-user";
 const SYNC_PASSWORD_HEADER: &str = "x-orange-notes-password";
@@ -215,13 +218,15 @@ fn tools() -> Value {
         },
         {
             "name": "list_notes",
-            "description": "List notes. Content is omitted unless includeContent is true.",
+            "description": "List note metadata with bounded previews. Full content is not returned; use get_note for one note's content.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "folderId": { "type": "string" },
                     "query": { "type": "string" },
-                    "includeContent": { "type": "boolean" }
+                    "includeContent": { "type": "boolean", "description": "Deprecated compatibility flag; bulk lists always omit full content." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
+                    "offset": { "type": "integer", "minimum": 0 }
                 },
                 "additionalProperties": false
             }
@@ -289,58 +294,69 @@ async fn list_folders(db: &Database, user_id: &str) -> Result<Value, String> {
 }
 
 async fn list_notes(db: &Database, user_id: &str, arguments: &Value) -> Result<Value, String> {
-    let state = get_state(db, user_id).await?;
-    let folder_id = string_arg(arguments, &["folderId", "folder_id"]);
-    let query = string_arg(arguments, &["query"]).map(|value| value.to_lowercase());
-    let include_content =
+    let folder_id = string_arg(arguments, &["folderId", "folder_id"])
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let query = string_arg(arguments, &["query"])
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let include_content_requested =
         bool_arg(arguments, &["includeContent", "include_content"]).unwrap_or(false);
-    let notes = state
-        .notes
+    let limit = i64_arg(arguments, &["limit"])
+        .unwrap_or(DEFAULT_NOTE_LIST_LIMIT)
+        .clamp(1, MAX_NOTE_LIST_LIMIT);
+    let offset = i64_arg(arguments, &["offset"]).unwrap_or(0).max(0);
+    let fetch_limit = limit.saturating_add(1);
+    let summaries = db
+        .list_note_summaries(
+            user_id,
+            folder_id,
+            query,
+            fetch_limit,
+            offset,
+            NOTE_PREVIEW_CHARS,
+        )
+        .await
+        .map_err(|error| format!("database error: {error}"))?;
+    let has_more = summaries.len() > limit as usize;
+    let notes = summaries
         .into_iter()
-        .filter(|note| {
-            folder_id
-                .as_ref()
-                .map(|id| &note.folder == id)
-                .unwrap_or(true)
-        })
-        .filter(|note| {
-            query
-                .as_ref()
-                .map(|query| {
-                    note.title.to_lowercase().contains(query)
-                        || note.content.to_lowercase().contains(query)
-                })
-                .unwrap_or(true)
-        })
-        .map(|note| {
-            if include_content {
-                json!(note)
-            } else {
-                json!({
-                    "id": note.id,
-                    "title": note.title,
-                    "folder": note.folder,
-                    "createdAt": note.created_at,
-                    "updatedAt": note.updated_at,
-                    "sortOrder": note.sort_order,
-                    "pinned": note.pinned,
-                    "favorite": note.favorite
-                })
-            }
-        })
+        .take(limit as usize)
+        .map(note_summary_value)
         .collect::<Vec<_>>();
-    Ok(json!({ "notes": notes }))
+
+    Ok(json!({
+        "notes": notes,
+        "limit": limit,
+        "offset": offset,
+        "hasMore": has_more,
+        "contentIncluded": false,
+        "includeContentIgnored": include_content_requested
+    }))
 }
 
 async fn get_note(db: &Database, user_id: &str, arguments: &Value) -> Result<Value, String> {
     let id = required_string(arguments, &["id"])?;
-    let state = get_state(db, user_id).await?;
-    let note = state
-        .notes
-        .into_iter()
-        .find(|note| note.id == id)
+    let note = db
+        .get_note_by_id(user_id, &id)
+        .await
+        .map_err(|error| format!("database error: {error}"))?
         .ok_or_else(|| format!("note not found: {id}"))?;
     Ok(json!(note))
+}
+
+fn note_summary_value(note: NoteSummary) -> Value {
+    json!({
+        "id": note.id,
+        "title": note.title,
+        "folder": note.folder,
+        "createdAt": note.created_at,
+        "updatedAt": note.updated_at,
+        "sortOrder": note.sort_order,
+        "pinned": note.pinned,
+        "favorite": note.favorite,
+        "contentPreview": note.content_preview
+    })
 }
 
 async fn create_note(db: &Database, user_id: &str, arguments: &Value) -> Result<Value, String> {
