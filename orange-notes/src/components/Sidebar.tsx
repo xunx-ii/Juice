@@ -28,13 +28,18 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { useSyncStore } from "@/sync/useSyncStore";
+import { useSyncStore, type SyncSettings } from "@/sync/useSyncStore";
 import { SyncClient } from "@/sync/client";
 import { showToast } from "@/store/useToastStore";
 
-function SyncSettingsSection() {
+function SyncSettingsSection({
+  draft,
+  onDraftChange,
+}: {
+  draft: SyncSettings;
+  onDraftChange: (settings: SyncSettings) => void;
+}) {
   const {
-    settings,
     lastSync,
     setSettings,
     syncing,
@@ -42,17 +47,23 @@ function SyncSettingsSection() {
     connectRealtime,
     authenticated,
   } = useSyncStore();
-  const [address, setAddress] = useState(settings.address);
-  const [username, setUsername] = useState(settings.username);
-  const [password, setPassword] = useState(settings.password);
   const [testing, setTesting] = useState(false);
   const [showRegister, setShowRegister] = useState(false);
   const [regUsername, setRegUsername] = useState("");
   const [regPassword, setRegPassword] = useState("");
   const [regLoading, setRegLoading] = useState(false);
 
+  const normalizedDraft = () => ({
+    address: draft.address.trim(),
+    username: draft.username.trim(),
+    password: draft.password,
+  });
+  const updateDraft = (partial: Partial<SyncSettings>) => {
+    onDraftChange({ ...draft, ...partial });
+  };
+
   const handleRegister = async () => {
-    if (!address.trim()) {
+    if (!draft.address.trim()) {
       showToast("请先填写服务器地址", "destructive");
       return;
     }
@@ -62,7 +73,7 @@ function SyncSettingsSection() {
     }
     setRegLoading(true);
     try {
-      const httpBase = SyncClient.httpBaseUrl(address);
+      const httpBase = SyncClient.httpBaseUrl(draft.address);
       const r = await fetch(`${httpBase}/api/admin/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -71,8 +82,7 @@ function SyncSettingsSection() {
       const data = await r.json();
       if (data.success) {
         showToast(data.message || "注册成功", "success");
-        setUsername(regUsername.trim());
-        setPassword(regPassword);
+        updateDraft({ username: regUsername.trim(), password: regPassword });
         setRegUsername("");
         setRegPassword("");
       } else {
@@ -86,11 +96,13 @@ function SyncSettingsSection() {
   };
 
   const handleTest = async () => {
-    if (!address.trim() || !username.trim() || !password) {
+    const next = normalizedDraft();
+    if (!next.address || !next.username || !next.password) {
       showToast("请填写所有字段", "destructive");
       return;
     }
-    setSettings({ address, username, password });
+    onDraftChange(next);
+    setSettings(next);
     setTesting(true);
     try {
       await connectRealtime(false); // toast on failure shown by connectRealtime
@@ -103,7 +115,9 @@ function SyncSettingsSection() {
   };
 
   const handleSave = () => {
-    setSettings({ address, username, password });
+    const next = normalizedDraft();
+    onDraftChange(next);
+    setSettings(next);
     showToast("设置已保存", "success", 2000);
   };
 
@@ -120,8 +134,8 @@ function SyncSettingsSection() {
       <label className="block">
         <span className="text-xs text-muted-foreground mb-1 block">服务器地址</span>
         <Input
-          value={address}
-          onChange={(e) => setAddress(e.target.value)}
+          value={draft.address}
+          onChange={(e) => updateDraft({ address: e.target.value })}
           placeholder="例如 example.com:8777"
         />
       </label>
@@ -129,8 +143,8 @@ function SyncSettingsSection() {
       <label className="block">
         <span className="text-xs text-muted-foreground mb-1 block">用户名</span>
         <Input
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
+          value={draft.username}
+          onChange={(e) => updateDraft({ username: e.target.value })}
         />
       </label>
 
@@ -138,8 +152,8 @@ function SyncSettingsSection() {
         <span className="text-xs text-muted-foreground mb-1 block">密码</span>
         <Input
           type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
+          value={draft.password}
+          onChange={(e) => updateDraft({ password: e.target.value })}
         />
       </label>
 
@@ -237,24 +251,36 @@ async function copyText(text: string, successMessage: string) {
   }
 }
 
-function McpSettingsSection() {
-  const settings = useSyncStore((s) => s.settings);
+function syncAuthHeaders(settings: { username: string; password: string }): HeadersInit {
+  return {
+    "x-orange-notes-auth": `${encodeURIComponent(settings.username)}:${encodeURIComponent(
+      settings.password
+    )}`,
+  };
+}
+
+function McpSettingsSection({ settings }: { settings: SyncSettings }) {
+  const { address, username, password } = settings;
   const [token, setToken] = useState("");
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const mcpUrls = useMemo(() => {
-    if (!settings.address || !settings.username) return null;
+    if (!address || !username) return null;
     try {
-      const baseUrl = SyncClient.httpBaseUrl(settings.address);
+      const baseUrl = SyncClient.httpBaseUrl(address);
       return {
         baseUrl,
-        tokenUrl: `${baseUrl}/api/sync/mcp-token/${encodeURIComponent(settings.username)}`,
+        tokenUrl: `${baseUrl}/api/sync/mcp-token/${encodeURIComponent(username)}`,
       };
     } catch {
       return null;
     }
-  }, [settings.address, settings.username]);
-  const hasCredentials = Boolean(settings.address && settings.username && settings.password);
+  }, [address, username]);
+  const authHeaders = useMemo(
+    () => syncAuthHeaders({ username, password }),
+    [username, password]
+  );
+  const hasCredentials = Boolean(address && username && password);
   const hasSettings = hasCredentials && mcpUrls !== null;
   const endpoint = token && mcpUrls ? `${mcpUrls.baseUrl}/mcp?token=${token}` : "";
 
@@ -271,10 +297,7 @@ function McpSettingsSection() {
     setLoading(true);
     setToken("");
     void fetch(mcpUrls.tokenUrl, {
-      headers: {
-        "x-orange-notes-user": settings.username,
-        "x-orange-notes-password": settings.password,
-      },
+      headers: authHeaders,
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(await response.text());
@@ -293,21 +316,18 @@ function McpSettingsSection() {
     return () => {
       active = false;
     };
-  }, [hasCredentials, mcpUrls, settings.password, settings.username]);
+  }, [authHeaders, hasCredentials, mcpUrls]);
 
   const handleGenerate = async () => {
     if (!hasSettings || !mcpUrls) {
-      showToast("请先保存有效的同步服务器设置", "destructive");
+      showToast("请先填写有效的同步服务器设置", "destructive");
       return;
     }
     setGenerating(true);
     try {
       const response = await fetch(mcpUrls.tokenUrl, {
         method: "POST",
-        headers: {
-          "x-orange-notes-user": settings.username,
-          "x-orange-notes-password": settings.password,
-        },
+        headers: authHeaders,
       });
       if (!response.ok) throw new Error(await response.text());
       const data = (await response.json()) as { token: string };
@@ -384,6 +404,22 @@ function SettingsDialog({
 }) {
   const darkMode = useNoteStore((s) => s.darkMode);
   const toggleDarkMode = useNoteStore((s) => s.toggleDarkMode);
+  const syncSettings = useSyncStore((s) => s.settings);
+  const {
+    address: savedAddress,
+    username: savedUsername,
+    password: savedPassword,
+  } = syncSettings;
+  const [syncDraft, setSyncDraft] = useState(syncSettings);
+
+  useEffect(() => {
+    if (!open) return;
+    setSyncDraft({
+      address: savedAddress,
+      username: savedUsername,
+      password: savedPassword,
+    });
+  }, [open, savedAddress, savedUsername, savedPassword]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -415,10 +451,10 @@ function SettingsDialog({
           <Separator />
 
           {/* Sync Settings */}
-          <SyncSettingsSection />
+          <SyncSettingsSection draft={syncDraft} onDraftChange={setSyncDraft} />
           <Separator />
 
-          <McpSettingsSection />
+          <McpSettingsSection settings={syncDraft} />
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>

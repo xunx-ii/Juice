@@ -18,6 +18,7 @@ use crate::{
 
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MCP_SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+const SYNC_AUTH_HEADER: &str = "x-orange-notes-auth";
 const SYNC_USER_HEADER: &str = "x-orange-notes-user";
 const SYNC_PASSWORD_HEADER: &str = "x-orange-notes-password";
 
@@ -526,27 +527,52 @@ async fn require_sync_auth(
     db: &Database,
     username: &str,
 ) -> Result<(), (StatusCode, String)> {
-    let auth_user = required_header(headers, SYNC_USER_HEADER)?;
-    let password = required_header(headers, SYNC_PASSWORD_HEADER)?;
+    let (auth_user, password) = sync_credentials(headers)?;
     if auth_user != username {
         return Err((StatusCode::FORBIDDEN, "同步用户不匹配".to_string()));
     }
-    match db.get_user_password_hash(auth_user.to_string()).await {
-        Ok(Some(hash)) if auth::verify_password(password, hash.as_str()) => Ok(()),
+    match db.get_user_password_hash(auth_user).await {
+        Ok(Some(hash)) if auth::verify_password(&password, hash.as_str()) => Ok(()),
         Ok(_) => Err((StatusCode::UNAUTHORIZED, "同步认证失败".to_string())),
         Err(error) => Err(database_error(error)),
     }
 }
 
-fn required_header<'a>(
-    headers: &'a HeaderMap,
-    name: &'static str,
-) -> Result<&'a str, (StatusCode, String)> {
+fn sync_credentials(headers: &HeaderMap) -> Result<(String, String), (StatusCode, String)> {
+    if let Some(encoded) = header_value(headers, SYNC_AUTH_HEADER) {
+        let Some((user, password)) = encoded.split_once(':') else {
+            return Err((StatusCode::UNAUTHORIZED, "同步认证信息格式错误".to_string()));
+        };
+        return Ok((decode_header_part(user)?, decode_header_part(password)?));
+    }
+
+    Ok((
+        required_header(headers, SYNC_USER_HEADER)?,
+        required_header(headers, SYNC_PASSWORD_HEADER)?,
+    ))
+}
+
+fn header_value<'a>(headers: &'a HeaderMap, name: &'static str) -> Option<&'a str> {
     headers
         .get(name)
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
+}
+
+fn required_header(
+    headers: &HeaderMap,
+    name: &'static str,
+) -> Result<String, (StatusCode, String)> {
+    header_value(headers, name)
+        .map(str::to_string)
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "缺少同步认证信息".to_string()))
+}
+
+fn decode_header_part(value: &str) -> Result<String, (StatusCode, String)> {
+    percent_encoding::percent_decode_str(value)
+        .decode_utf8()
+        .map(|value| value.into_owned())
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "同步认证信息格式错误".to_string()))
 }
 
 fn database_error(error: rusqlite::Error) -> (StatusCode, String) {
