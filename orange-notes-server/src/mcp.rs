@@ -111,11 +111,14 @@ pub async fn store_e2ee_check(
         .map_err(|message| (StatusCode::UNAUTHORIZED, message))?;
 
     let updated = db
-        .update_encryption_mcp_check(&username, request.check)
+        .update_encryption_mcp_check(&username, request.check, &encryption)
         .await
         .map_err(database_error)?;
     if !updated {
-        return Err((StatusCode::BAD_REQUEST, "端到端加密尚未开启".to_string()));
+        return Err((
+            StatusCode::CONFLICT,
+            "端到端加密状态已变化，请重新同步后再更新密钥".to_string(),
+        ));
     }
     Ok(Json(json!({ "valid": true })))
 }
@@ -848,11 +851,11 @@ fn new_folder(name: String, sort_order: i64) -> Folder {
 }
 
 fn can_read(permission: &str) -> bool {
-    permission != "none"
+    matches!(permission, "read" | "write")
 }
 
 fn can_write(permission: &str) -> bool {
-    permission == "write"
+    matches!(permission, "write")
 }
 
 fn ensure_folder_writable(state: &NotebookState, folder_id: &str) -> Result<(), String> {
@@ -896,7 +899,7 @@ fn folder_allows(folders: &[Folder], folder_id: &str, predicate: fn(&str) -> boo
             return false;
         }
         let Some(folder) = by_id.get(id) else {
-            return true;
+            return false;
         };
         if !predicate(&folder.ai_permission) {
             return false;
@@ -1046,7 +1049,7 @@ fn crypto_from_passphrase(meta: &EncryptionMeta, passphrase: &str) -> Result<Mcp
     if meta.version != 1 || meta.algorithm != "AES-GCM" || meta.kdf != "PBKDF2-SHA256" {
         return Err("端到端加密参数不受支持".to_string());
     }
-    if meta.iterations <= 0 {
+    if meta.iterations <= 0 || meta.iterations > u32::MAX as i64 {
         return Err("端到端加密参数无效".to_string());
     }
     let salt = BASE64

@@ -404,14 +404,35 @@ impl Database {
         &self,
         user_id: &str,
         mcp_check: String,
+        encryption: &EncryptionMeta,
     ) -> Result<bool, rusqlite::Error> {
         let user_id = user_id.to_string();
+        let encryption = encryption.clone();
         self.conn(move |conn| {
             let changed = conn.execute(
                 "UPDATE encryption_meta
                  SET mcp_check = ?2
-                 WHERE user_id = ?1 AND enabled = 1",
-                params![user_id, mcp_check],
+                 WHERE user_id = ?1
+                   AND enabled = ?3
+                   AND version = ?4
+                   AND algorithm = ?5
+                   AND kdf = ?6
+                   AND salt = ?7
+                   AND iterations = ?8
+                   AND key_check_iv = ?9
+                   AND key_check = ?10",
+                params![
+                    user_id,
+                    mcp_check,
+                    encryption.enabled as i64,
+                    encryption.version,
+                    encryption.algorithm,
+                    encryption.kdf,
+                    encryption.salt,
+                    encryption.iterations,
+                    encryption.key_check_iv,
+                    encryption.key_check,
+                ],
             )?;
             Ok(changed > 0)
         })
