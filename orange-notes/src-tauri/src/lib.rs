@@ -187,23 +187,18 @@ fn local_image_file_names(img_dir: &PathBuf) -> Result<HashSet<String>, AppError
     Ok(names)
 }
 
-fn data_dir(app: &tauri::App) -> Result<PathBuf, AppError> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| AppError::Path(e.to_string()))?;
-    fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
-fn executable_img_dir(app: &tauri::App) -> Result<PathBuf, AppError> {
+fn executable_data_dir() -> Result<PathBuf, AppError> {
     let exe = std::env::current_exe()?;
     let parent = exe
         .parent()
         .ok_or_else(|| AppError::Path("failed to resolve executable directory".to_string()))?;
+    Ok(parent.to_path_buf())
+}
+
+fn executable_img_dir() -> Result<PathBuf, AppError> {
+    let parent = executable_data_dir()?;
     let img_dir = parent.join("img");
     fs::create_dir_all(&img_dir)?;
-    let _ = app;
     Ok(img_dir)
 }
 
@@ -405,8 +400,8 @@ struct RemoteNoteArg {
 }
 
 fn read_all(conn: &Connection) -> Result<NotebookData, AppError> {
-    let mut folders_stmt =
-        conn.prepare("SELECT id, name, sort_order, parent_id FROM folders ORDER BY sort_order ASC")?;
+    let mut folders_stmt = conn
+        .prepare("SELECT id, name, sort_order, parent_id FROM folders ORDER BY sort_order ASC")?;
     let folders = folders_stmt
         .query_map([], |row| {
             Ok(Folder {
@@ -452,7 +447,9 @@ fn read_all(conn: &Connection) -> Result<NotebookData, AppError> {
             "SELECT entity_id FROM sync_changes WHERE entity_type = $1 AND operation = $2 ORDER BY entity_id ASC",
         )?;
         let rows = stmt
-            .query_map(params![entity_type, operation], |row| row.get::<_, String>(0))?
+            .query_map(params![entity_type, operation], |row| {
+                row.get::<_, String>(0)
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     };
@@ -516,9 +513,11 @@ fn create_note(state: tauri::State<'_, AppState>, folder_id: String) -> Result<N
 fn delete_note(state: tauri::State<'_, AppState>, id: String) -> Result<Vec<String>, AppError> {
     let conn = state.db.lock().expect("database mutex poisoned");
     let content = conn
-        .query_row("SELECT content FROM notes WHERE id = $1", params![id], |row| {
-            row.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT content FROM notes WHERE id = $1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
         .unwrap_or_default();
     let candidates = extract_image_file_names(&content);
     conn.execute("DELETE FROM notes WHERE id = $1", params![id])?;
@@ -592,10 +591,13 @@ fn reorder_note(
 
     if source_folder_id != target_folder_id {
         let source_ids = {
-            let mut source_stmt =
-                conn.prepare("SELECT id FROM notes WHERE folder = $1 AND id != $2 ORDER BY sort_order ASC")?;
+            let mut source_stmt = conn.prepare(
+                "SELECT id FROM notes WHERE folder = $1 AND id != $2 ORDER BY sort_order ASC",
+            )?;
             let ids = source_stmt
-                .query_map(params![source_folder_id, note_id], |row| row.get::<_, String>(0))?
+                .query_map(params![source_folder_id, note_id], |row| {
+                    row.get::<_, String>(0)
+                })?
                 .collect::<Result<Vec<_>, _>>()?;
             ids
         };
@@ -608,10 +610,13 @@ fn reorder_note(
     }
 
     let mut target_ids = {
-        let mut target_stmt =
-            conn.prepare("SELECT id FROM notes WHERE folder = $1 AND id != $2 ORDER BY sort_order ASC")?;
+        let mut target_stmt = conn.prepare(
+            "SELECT id FROM notes WHERE folder = $1 AND id != $2 ORDER BY sort_order ASC",
+        )?;
         let ids = target_stmt
-            .query_map(params![target_folder_id, note_id], |row| row.get::<_, String>(0))?
+            .query_map(params![target_folder_id, note_id], |row| {
+                row.get::<_, String>(0)
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         ids
     };
@@ -664,9 +669,16 @@ fn create_folder(
 }
 
 #[tauri::command]
-fn rename_folder(state: tauri::State<'_, AppState>, id: String, name: String) -> Result<(), AppError> {
+fn rename_folder(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    name: String,
+) -> Result<(), AppError> {
     let conn = state.db.lock().expect("database mutex poisoned");
-    conn.execute("UPDATE folders SET name = $1 WHERE id = $2", params![name, id])?;
+    conn.execute(
+        "UPDATE folders SET name = $1 WHERE id = $2",
+        params![name, id],
+    )?;
     Ok(())
 }
 
@@ -733,7 +745,9 @@ fn move_folder(
         let mut current = target.clone();
         loop {
             if current == folder_id {
-                return Err(AppError::Path("cannot move folder into its own descendant".into()));
+                return Err(AppError::Path(
+                    "cannot move folder into its own descendant".into(),
+                ));
             }
             let parent: Option<String> = conn.query_row(
                 "SELECT parent_id FROM folders WHERE id = $1",
@@ -789,7 +803,8 @@ fn reorder_folder(
 ) -> Result<NotebookData, AppError> {
     let conn = state.db.lock().expect("database mutex poisoned");
     let mut folder_ids = {
-        let mut stmt = conn.prepare("SELECT id FROM folders WHERE id != $1 ORDER BY sort_order ASC")?;
+        let mut stmt =
+            conn.prepare("SELECT id FROM folders WHERE id != $1 ORDER BY sort_order ASC")?;
         let ids = stmt
             .query_map(params![folder_id], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -865,12 +880,17 @@ fn save_clipboard_image(
 }
 
 #[tauri::command]
-fn load_note_image(state: tauri::State<'_, AppState>, file_name: String) -> Result<ImagePayload, AppError> {
+fn load_note_image(
+    state: tauri::State<'_, AppState>,
+    file_name: String,
+) -> Result<ImagePayload, AppError> {
     let path = state.img_dir.join(&file_name);
     let canonical_img = state.img_dir.canonicalize()?;
     let canonical_path = path.canonicalize()?;
     if !canonical_path.starts_with(canonical_img) {
-        return Err(AppError::Path("image path escaped img directory".to_string()));
+        return Err(AppError::Path(
+            "image path escaped img directory".to_string(),
+        ));
     }
 
     Ok(ImagePayload {
@@ -881,19 +901,27 @@ fn load_note_image(state: tauri::State<'_, AppState>, file_name: String) -> Resu
 
 /// Read a local image file as raw bytes (for uploading to the server).
 #[tauri::command]
-fn read_note_image_bytes(state: tauri::State<'_, AppState>, file_name: String) -> Result<Vec<u8>, AppError> {
+fn read_note_image_bytes(
+    state: tauri::State<'_, AppState>,
+    file_name: String,
+) -> Result<Vec<u8>, AppError> {
     let path = state.img_dir.join(&file_name);
     let canonical_img = state.img_dir.canonicalize()?;
     let canonical_path = path.canonicalize()?;
     if !canonical_path.starts_with(canonical_img) {
-        return Err(AppError::Path("image path escaped img directory".to_string()));
+        return Err(AppError::Path(
+            "image path escaped img directory".to_string(),
+        ));
     }
     Ok(fs::read(canonical_path)?)
 }
 
 /// Check if a local image file exists (without reading it).
 #[tauri::command]
-fn image_file_exists(state: tauri::State<'_, AppState>, file_name: String) -> Result<bool, AppError> {
+fn image_file_exists(
+    state: tauri::State<'_, AppState>,
+    file_name: String,
+) -> Result<bool, AppError> {
     if file_name.contains('/') || file_name.contains('\\') || file_name.is_empty() {
         return Ok(false);
     }
@@ -906,7 +934,11 @@ fn cleanup_unreferenced_note_images(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<String>, AppError> {
     let conn = state.db.lock().expect("database mutex poisoned");
-    cleanup_unreferenced_images(&conn, &state.img_dir, local_image_file_names(&state.img_dir)?)
+    cleanup_unreferenced_images(
+        &conn,
+        &state.img_dir,
+        local_image_file_names(&state.img_dir)?,
+    )
 }
 
 /// Save a downloaded image to the local img directory (for syncing from server).
@@ -926,14 +958,18 @@ fn save_synced_image(
     if path.exists() {
         let canonical_path = path.canonicalize()?;
         if !canonical_path.starts_with(&canonical_img) {
-            return Err(AppError::Path("image path escaped img directory".to_string()));
+            return Err(AppError::Path(
+                "image path escaped img directory".to_string(),
+            ));
         }
     } else {
         fs::write(&path, &bytes)?;
         let canonical_path = path.canonicalize()?;
         if !canonical_path.starts_with(&canonical_img) {
             let _ = fs::remove_file(&canonical_path);
-            return Err(AppError::Path("image path escaped img directory".to_string()));
+            return Err(AppError::Path(
+                "image path escaped img directory".to_string(),
+            ));
         }
     }
     let _ = mime; // mime is informational; filename already encodes type
@@ -954,10 +990,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
-            let db_path = data_dir(app)?.join("notes.sqlite");
+            let db_path = executable_data_dir()?.join("notes.sqlite");
             let conn = Connection::open(db_path)?;
             init_schema(&conn)?;
-            let img_dir = executable_img_dir(app)?;
+            let img_dir = executable_img_dir()?;
             app.manage(AppState {
                 db: Mutex::new(conn),
                 img_dir,
