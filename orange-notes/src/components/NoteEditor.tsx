@@ -60,6 +60,7 @@ const IMAGE_TOKEN_RE = /!\[\[([^\]\r\n]+)\]\]/g;
 const EMPTY_EDITOR_MIN_HEIGHT = 96;
 const TEXT_SEGMENT_MIN_HEIGHT = 28;
 const MARKDOWN_PLUGINS = [remarkGfm, remarkBreaks];
+const WORD_LIKE_CHAR_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
 
 type Segment =
   | { type: "text"; value: string }
@@ -82,6 +83,14 @@ interface ImagePayload {
 }
 
 const imageUrlCache = new Map<string, string>();
+
+function cacheImageUrl(fileName: string, url: string) {
+  const previous = imageUrlCache.get(fileName);
+  if (previous && previous !== url) {
+    URL.revokeObjectURL(previous);
+  }
+  imageUrlCache.set(fileName, url);
+}
 
 function revokeCachedImage(fileName: string) {
   const url = imageUrlCache.get(fileName);
@@ -199,7 +208,7 @@ function NoteImage({
             const url = URL.createObjectURL(
               new Blob([new Uint8Array(payload.bytes)], { type: payload.mime })
             );
-            imageUrlCache.set(fileName, url);
+            cacheImageUrl(fileName, url);
             setSrc(url);
           })
           .catch((error) => {
@@ -326,8 +335,9 @@ function NoteStats({ content }: { content: string }) {
     const text = content.replace(/!\[\[[^\]\r\n]+\]\]/g, "");
     const charCount = text.length;
     // Approximate: CJK chars + space-separated Latin words
-    const cjkCount = (text.match(/[一-鿿぀-ヿ가-��]/g) ?? []).length;
-    const wordCount = cjkCount + (text.replace(/[一-鿿぀-ヿ가-��]/g, "").match(/\S+/g) ?? []).length;
+    const wordLikeCharCount = (text.match(WORD_LIKE_CHAR_RE) ?? []).length;
+    const wordCount =
+      wordLikeCharCount + (text.replace(WORD_LIKE_CHAR_RE, "").match(/\S+/g) ?? []).length;
     const readingMinutes = Math.max(1, Math.round(wordCount / 350));
     return { charCount, wordCount, readingMinutes };
   }, [content]);
@@ -763,7 +773,7 @@ export function NoteEditor() {
         mime: file.type,
         base64Data,
       });
-      imageUrlCache.set(saved.fileName, URL.createObjectURL(file));
+      cacheImageUrl(saved.fileName, URL.createObjectURL(file));
       contentDirtyRef.current = true;
       const currentContent = contentRef.current;
       const prefix = currentContent.length === 0 || currentContent.endsWith("\n") ? "" : "\n";

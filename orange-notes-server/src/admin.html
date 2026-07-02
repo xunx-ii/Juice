@@ -54,7 +54,7 @@
   <div class="section">
     <h2>
       WebSocket 在线客户端
-      <button class="refresh" onclick="loadAll()">刷新</button>
+      <button id="refresh-button" class="refresh">刷新</button>
     </h2>
     <table>
       <thead><tr><th>用户</th><th>连接时间</th></tr></thead>
@@ -64,7 +64,7 @@
 
   <div class="section">
     <h2>注册用户
-      <button class="refresh" onclick="toggleRegister()">+ 新建</button>
+      <button id="register-toggle-button" class="refresh">+ 新建</button>
     </h2>
     <div id="register-form" style="display:none; margin-top:1rem;">
       <div style="display:flex; gap:0.75rem; flex-wrap:wrap; align-items:flex-end;">
@@ -76,7 +76,7 @@
           <label style="display:block; font-size:0.75rem; color:#8b949e; margin-bottom:0.3rem;">密码</label>
           <input id="reg-password" type="password" placeholder="输入密码" style="background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:0.45rem 0.7rem; border-radius:6px; font-size:0.875rem; width:180px;">
         </div>
-        <button onclick="doRegister()" style="background:#238636; border:none; color:#fff; padding:0.45rem 0.9rem; border-radius:6px; font-size:0.8rem; cursor:pointer;">注册</button>
+        <button id="register-submit-button" style="background:#238636; border:none; color:#fff; padding:0.45rem 0.9rem; border-radius:6px; font-size:0.8rem; cursor:pointer;">注册</button>
       </div>
       <div id="register-msg" style="margin-top:0.6rem; font-size:0.8rem;"></div>
     </div>
@@ -99,7 +99,7 @@
     <h2 style="color:#f0f6fc; font-size:1.1rem; margin-bottom:0.5rem;">🔐 管理员验证</h2>
     <p style="color:#8b949e; font-size:0.8rem; margin-bottom:1.25rem;">请输入管理令牌（ADMIN_TOKEN）以访问后台</p>
     <input id="token-input" type="password" placeholder="管理令牌" style="width:100%; background:#0d1117; border:1px solid #30363d; color:#c9d1d9; padding:0.6rem 0.8rem; border-radius:6px; font-size:0.875rem; margin-bottom:1rem; box-sizing:border-box;">
-    <button onclick="submitToken()" style="width:100%; background:#238636; border:none; color:#fff; padding:0.55rem; border-radius:6px; font-size:0.875rem; cursor:pointer;">登录</button>
+    <button id="token-submit-button" style="width:100%; background:#238636; border:none; color:#fff; padding:0.55rem; border-radius:6px; font-size:0.875rem; cursor:pointer;">登录</button>
     <div id="token-error" style="margin-top:0.6rem; font-size:0.8rem; color:#f85149;"></div>
   </div>
 </div>
@@ -108,6 +108,30 @@
 // Token management
 function getToken() { return localStorage.getItem('admin_token') || ''; }
 function setToken(t) { localStorage.setItem('admin_token', t); }
+function el(id) { return document.getElementById(id); }
+function clearChildren(node) {
+  while (node.firstChild) node.removeChild(node.firstChild);
+}
+function appendTextCell(row, text) {
+  const td = document.createElement('td');
+  td.textContent = text;
+  row.appendChild(td);
+  return td;
+}
+function renderTableMessage(tbody, colspan, message) {
+  clearChildren(tbody);
+  const row = document.createElement('tr');
+  const cell = document.createElement('td');
+  cell.colSpan = colspan;
+  cell.className = 'empty';
+  cell.textContent = message;
+  row.appendChild(cell);
+  tbody.appendChild(row);
+}
+function setInlineMessage(node, message, color) {
+  node.textContent = message;
+  node.style.color = color;
+}
 
 async function fetchJSON(path) {
   const token = getToken();
@@ -116,7 +140,7 @@ async function fetchJSON(path) {
   const r = await fetch(path, { headers });
   if (r.status === 401) {
     // Token missing or invalid — show the login modal.
-    document.getElementById('token-modal').style.display = 'flex';
+    el('token-modal').style.display = 'flex';
     throw new Error('未授权：请提供有效的管理令牌');
   }
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -124,11 +148,11 @@ async function fetchJSON(path) {
 }
 
 function submitToken() {
-  const t = document.getElementById('token-input').value.trim();
+  const t = el('token-input').value.trim();
   if (!t) return;
   setToken(t);
-  document.getElementById('token-modal').style.display = 'none';
-  document.getElementById('token-error').textContent = '';
+  el('token-modal').style.display = 'none';
+  el('token-error').textContent = '';
   loadAll();
 }
 
@@ -140,23 +164,28 @@ function fmtUptime(sec) {
 }
 
 function showError(msg) {
-  document.getElementById('error-area').innerHTML = `<div class="error">⚠️ ${msg}</div>`;
+  const area = el('error-area');
+  clearChildren(area);
+  const box = document.createElement('div');
+  box.className = 'error';
+  box.textContent = `⚠️ ${msg}`;
+  area.appendChild(box);
 }
 function clearError() {
-  document.getElementById('error-area').innerHTML = '';
+  clearChildren(el('error-area'));
 }
 
 async function loadStats() {
   try {
     const info = await fetchJSON('/api/admin/systeminfo');
-    document.getElementById('folder-count').textContent = info.folder_count ?? 0;
-    document.getElementById('note-count').textContent = info.note_count ?? 0;
-    document.getElementById('user-count').textContent = info.user_count ?? 0;
-    document.getElementById('ws-count').textContent = info.active_ws_clients ?? 0;
-    document.getElementById('uptime').textContent = fmtUptime(info.uptime_seconds ?? 0);
-    document.getElementById('version').textContent = info.version ?? '—';
+    el('folder-count').textContent = info.folder_count ?? 0;
+    el('note-count').textContent = info.note_count ?? 0;
+    el('user-count').textContent = info.user_count ?? 0;
+    el('ws-count').textContent = info.active_ws_clients ?? 0;
+    el('uptime').textContent = fmtUptime(info.uptime_seconds ?? 0);
+    el('version').textContent = info.version ?? '—';
     const startDate = new Date(Date.now() - (info.uptime_seconds ?? 0) * 1000);
-    document.getElementById('subtitle').textContent = `服务自 ${startDate.toLocaleString('zh-CN')} 运行中`;
+    el('subtitle').textContent = `服务自 ${startDate.toLocaleString('zh-CN')} 运行中`;
     clearError();
   } catch (e) {
     showError(`系统信息加载失败: ${e.message}`);
@@ -167,17 +196,28 @@ async function loadClients() {
   try {
     const data = await fetchJSON('/api/admin/ws_clients');
     const clients = data.clients ?? [];
-    const tbody = document.getElementById('ws-tbody');
+    const tbody = el('ws-tbody');
     if (clients.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="2" class="empty">当前没有客户端连接</td></tr>';
+      renderTableMessage(tbody, 2, '当前没有客户端连接');
     } else {
-      tbody.innerHTML = clients.map(c => `<tr>
-        <td><span class="badge online"><span class="dot"></span>${c.username || '未知'}</span></td>
-        <td>${c.connected_at || '—'}</td>
-      </tr>`).join('');
+      clearChildren(tbody);
+      clients.forEach(c => {
+        const row = document.createElement('tr');
+        const userCell = document.createElement('td');
+        const badge = document.createElement('span');
+        badge.className = 'badge online';
+        const dot = document.createElement('span');
+        dot.className = 'dot';
+        badge.appendChild(dot);
+        badge.appendChild(document.createTextNode(c.username || '未知'));
+        userCell.appendChild(badge);
+        row.appendChild(userCell);
+        appendTextCell(row, c.connected_at || '—');
+        tbody.appendChild(row);
+      });
     }
   } catch (e) {
-    document.getElementById('ws-tbody').innerHTML = `<tr><td colspan="2" class="empty">加载失败: ${e.message}</td></tr>`;
+    renderTableMessage(el('ws-tbody'), 2, `加载失败: ${e.message}`);
   }
 }
 
@@ -185,21 +225,29 @@ async function loadUsers() {
   try {
     const data = await fetchJSON('/api/admin/users?page=1&page_size=50');
     const users = data.users ?? [];
-    const tbody = document.getElementById('user-tbody');
+    const tbody = el('user-tbody');
     if (users.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="2" class="empty">暂无注册用户</td></tr>';
+      renderTableMessage(tbody, 3, '暂无注册用户');
     } else {
       const start = (data.pager?.page - 1) * data.pager?.page_size || 0;
-      tbody.innerHTML = users.map((u, i) => `<tr>
-        <td>${start + i + 1}</td>
-        <td>${u.username}</td>
-        <td style="text-align:right;">
-          <button onclick="deleteUser('${u.username}')" style="background:none; border:1px solid #f8514944; color:#f85149; padding:0.2rem 0.5rem; border-radius:4px; font-size:0.7rem; cursor:pointer;">删除</button>
-        </td>
-      </tr>`).join('');
+      clearChildren(tbody);
+      users.forEach((u, i) => {
+        const row = document.createElement('tr');
+        appendTextCell(row, String(start + i + 1));
+        appendTextCell(row, u.username);
+        const actionCell = document.createElement('td');
+        actionCell.style.textAlign = 'right';
+        const button = document.createElement('button');
+        button.textContent = '删除';
+        button.style.cssText = 'background:none; border:1px solid #f8514944; color:#f85149; padding:0.2rem 0.5rem; border-radius:4px; font-size:0.7rem; cursor:pointer;';
+        button.addEventListener('click', () => deleteUser(u.username));
+        actionCell.appendChild(button);
+        row.appendChild(actionCell);
+        tbody.appendChild(row);
+      });
     }
   } catch (e) {
-    document.getElementById('user-tbody').innerHTML = `<tr><td colspan="3" class="empty">加载失败: ${e.message}</td></tr>`;
+    renderTableMessage(el('user-tbody'), 3, `加载失败: ${e.message}`);
   }
 }
 
@@ -224,21 +272,21 @@ async function deleteUser(username) {
 }
 
 function toggleRegister() {
-  const el = document.getElementById('register-form');
-  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  const form = el('register-form');
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
 }
 
 async function doRegister() {
-  const username = document.getElementById('reg-username').value.trim();
-  const password = document.getElementById('reg-password').value;
-  const msgEl = document.getElementById('register-msg');
+  const username = el('reg-username').value.trim();
+  const password = el('reg-password').value;
+  const msgEl = el('register-msg');
 
   if (!username || !password) {
-    msgEl.innerHTML = '<span style="color:#f85149;">请填写用户名和密码</span>';
+    setInlineMessage(msgEl, '请填写用户名和密码', '#f85149');
     return;
   }
 
-  msgEl.innerHTML = '<span style="color:#8b949e;">注册中…</span>';
+  setInlineMessage(msgEl, '注册中…', '#8b949e');
 
   try {
     const r = await fetch('/api/admin/register', {
@@ -248,16 +296,16 @@ async function doRegister() {
     });
     const data = await r.json();
     if (data.success) {
-      msgEl.innerHTML = `<span style="color:#3fb950;">✓ ${data.message}</span>`;
-      document.getElementById('reg-username').value = '';
-      document.getElementById('reg-password').value = '';
+      setInlineMessage(msgEl, `✓ ${data.message}`, '#3fb950');
+      el('reg-username').value = '';
+      el('reg-password').value = '';
       loadUsers();
       loadStats();
     } else {
-      msgEl.innerHTML = `<span style="color:#f85149;">✗ ${data.message}</span>`;
+      setInlineMessage(msgEl, `✗ ${data.message}`, '#f85149');
     }
   } catch (e) {
-    msgEl.innerHTML = `<span style="color:#f85149;">请求失败: ${e.message}</span>`;
+    setInlineMessage(msgEl, `请求失败: ${e.message}`, '#f85149');
   }
 }
 
@@ -267,11 +315,18 @@ async function loadAll() {
 
 // If no saved token, show modal on first load.
 if (!getToken()) {
-  document.getElementById('token-modal').style.display = 'flex';
+  el('token-modal').style.display = 'flex';
 } else {
   loadAll();
   setInterval(loadAll, 15000);
 }
+el('refresh-button').addEventListener('click', loadAll);
+el('register-toggle-button').addEventListener('click', toggleRegister);
+el('register-submit-button').addEventListener('click', doRegister);
+el('token-submit-button').addEventListener('click', submitToken);
+el('token-input').addEventListener('keydown', event => {
+  if (event.key === 'Enter') submitToken();
+});
 </script>
 </body>
 </html>
