@@ -221,15 +221,18 @@ fn tools() -> Value {
         },
         {
             "name": "list_notes",
-            "description": "List note metadata with bounded previews. Full content is not returned; use get_note for one note's content.",
+            "description": "List note metadata with bounded previews. Pass limit/offset or page/pageSize to page through results. Full content is not returned; use get_note for one note's content.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "folderId": { "type": "string" },
-                    "query": { "type": "string" },
+                    "folderId": { "type": "string", "description": "Filter by folder id." },
+                    "folderName": { "type": "string", "description": "Filter by folder name when folderId is not available." },
+                    "query": { "type": "string", "description": "Search title and content." },
                     "includeContent": { "type": "boolean", "description": "Deprecated compatibility flag; bulk lists always omit full content." },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
-                    "offset": { "type": "integer", "minimum": 0 }
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 200, "description": "Page size controlled by the MCP client. Defaults to 50 and caps at 200." },
+                    "offset": { "type": "integer", "minimum": 0, "description": "Zero-based result offset controlled by the MCP client. Use nextOffset from the previous response to fetch the next page." },
+                    "page": { "type": "integer", "minimum": 1, "description": "One-based page number. Used only when offset is omitted." },
+                    "pageSize": { "type": "integer", "minimum": 1, "maximum": 200, "description": "Alias for limit." }
                 },
                 "additionalProperties": false
             }
@@ -270,6 +273,7 @@ fn tools() -> Value {
                     "title": { "type": "string" },
                     "content": { "type": "string" },
                     "folderId": { "type": "string" },
+                    "folderName": { "type": "string" },
                     "sortOrder": { "type": "integer" },
                     "pinned": { "type": "boolean" },
                     "favorite": { "type": "boolean" }
@@ -309,30 +313,32 @@ async fn list_notes(
     user_id: &str,
     arguments: &Value,
 ) -> Result<Value, String> {
-    let folder_id = string_arg(arguments, &["folderId", "folder_id"])
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let query = string_arg(arguments, &["query"])
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+    let requested_folder_id = trimmed_string_arg(arguments, &["folderId", "folder_id"]);
+    let requested_folder_name = trimmed_string_arg(arguments, &["folderName", "folder_name"]);
+    let query = trimmed_string_arg(arguments, &["query"]);
     let include_content_requested =
         bool_arg(arguments, &["includeContent", "include_content"]).unwrap_or(false);
-    let limit = i64_arg(arguments, &["limit"])
+    let limit = i64_arg(arguments, &["limit", "pageSize", "page_size"])
         .unwrap_or(DEFAULT_NOTE_LIST_LIMIT)
         .clamp(1, MAX_NOTE_LIST_LIMIT);
-    let offset = i64_arg(arguments, &["offset"]).unwrap_or(0).max(0);
+    let offset = i64_arg(arguments, &["offset"])
+        .map(|value| value.max(0))
+        .or_else(|| i64_arg(arguments, &["page"]).map(|page| (page.max(1) - 1) * limit))
+        .unwrap_or(0);
 
     let folders = db
         .list_folders(user_id)
         .await
         .map_err(|error| format!("database error: {error}"))?;
     let readable_folders = readable_folder_ids(&folders);
+    let folder_id = resolve_folder_filter(&folders, requested_folder_id, requested_folder_name);
     if let Some(folder_id) = folder_id.as_ref() {
         if !readable_folders.contains(folder_id) {
             return Ok(json!({
                 "notes": [],
                 "limit": limit,
                 "offset": offset,
+                "nextOffset": null,
                 "hasMore": false,
                 "contentIncluded": false,
                 "includeContentIgnored": include_content_requested
@@ -385,6 +391,7 @@ async fn list_notes(
         "notes": notes,
         "limit": limit,
         "offset": offset,
+        "nextOffset": if has_more { Value::from(offset + limit) } else { Value::Null },
         "hasMore": has_more,
         "contentIncluded": false,
         "includeContentIgnored": include_content_requested
@@ -480,11 +487,13 @@ async fn update_note(
         .position(|note| note.id == id)
         .ok_or_else(|| format!("note not found: {id}"))?;
     ensure_note_writable(&state, &state.notes[note_index])?;
-    let folder = if has_any(arguments, &["folderId", "folder_id"]) {
+    let folder_id = trimmed_string_arg(arguments, &["folderId", "folder_id"]);
+    let folder_name = trimmed_string_arg(arguments, &["folderName", "folder_name"]);
+    let folder = if folder_id.is_some() || folder_name.is_some() {
         let folder = ensure_folder(
             &mut state,
-            string_arg(arguments, &["folderId", "folder_id"]),
-            None,
+            folder_id,
+            folder_name,
         )?;
         ensure_folder_writable(&state, &folder)?;
         folder
@@ -607,6 +616,22 @@ fn ensure_folder(
     let id = folder.id.clone();
     state.folders.push(folder);
     Ok(id)
+}
+
+fn resolve_folder_filter(
+    folders: &[Folder],
+    folder_id: Option<String>,
+    folder_name: Option<String>,
+) -> Option<String> {
+    if folder_id.is_some() {
+        return folder_id;
+    }
+    let folder_name = folder_name?;
+    folders
+        .iter()
+        .find(|folder| folder.name == folder_name)
+        .map(|folder| folder.id.clone())
+        .or_else(|| Some("__orange_notes_folder_not_found__".to_string()))
 }
 
 fn next_root_folder_sort_order(state: &NotebookState) -> i64 {
@@ -756,6 +781,12 @@ fn required_string(arguments: &Value, names: &[&str]) -> Result<String, String> 
         .ok_or_else(|| format!("missing required argument: {}", names[0]))
 }
 
+fn trimmed_string_arg(arguments: &Value, names: &[&str]) -> Option<String> {
+    string_arg(arguments, names)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn string_arg(arguments: &Value, names: &[&str]) -> Option<String> {
     names.iter().find_map(|name| {
         arguments
@@ -775,10 +806,6 @@ fn i64_arg(arguments: &Value, names: &[&str]) -> Option<i64> {
     names
         .iter()
         .find_map(|name| arguments.get(*name).and_then(Value::as_i64))
-}
-
-fn has_any(arguments: &Value, names: &[&str]) -> bool {
-    names.iter().any(|name| arguments.get(*name).is_some())
 }
 
 fn now_millis() -> i64 {
