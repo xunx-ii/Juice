@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
+import { createPortal } from "react-dom";
 import {
   ChevronRight,
   ChevronDown,
@@ -172,6 +173,7 @@ function ContextMenuFlyout({
   currentPermission?: AiPermission;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const [permissionOpen, setPermissionOpen] = useState(false);
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -188,18 +190,25 @@ function ContextMenuFlyout({
     };
   }, [onClose]);
 
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
   const style: React.CSSProperties = useMemo(() => {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
     const menuWidth = 188;
-    const menuHeight = state.type === "folder" ? 285 : state.type === "empty" ? 80 : 205;
+    const menuHeight = state.type === "folder" ? 230 : state.type === "empty" ? 48 : 150;
     return {
       position: "fixed",
       left: Math.max(8, Math.min(state.x, vw - menuWidth - 8)),
       top: Math.max(8, Math.min(state.y, vh - menuHeight - 8)),
-      zIndex: 9999,
+      zIndex: 10000,
     };
-  }, [state.x, state.y, state.type, vw, vh]);
+  }, [state.x, state.y, state.type]);
+
+  const submenuSide = useMemo(() => {
+    const menuWidth = 188;
+    const submenuWidth = 142;
+    const left = Number(style.left) || state.x;
+    return left + menuWidth + submenuWidth + 8 > window.innerWidth ? "left" : "right";
+  }, [state.x, style.left]);
 
   const act = (fn: () => void) => {
     fn();
@@ -210,29 +219,57 @@ function ContextMenuFlyout({
     state.type === "empty" ? null : (
       <>
         <div className="h-px bg-border/60 my-1" />
-        {AI_PERMISSION_OPTIONS.map((option) => (
+        <div
+          className="relative"
+          onMouseEnter={() => setPermissionOpen(true)}
+          onMouseLeave={() => setPermissionOpen(false)}
+        >
           <button
-            key={option.value}
             className="flex items-center gap-2.5 w-full px-2.5 py-[7px] text-xs rounded-md hover:bg-accent/80 active:scale-[0.98] transition-all"
-            onClick={() => act(() => onSetPermission(state.id, option.value))}
+            onClick={() => setPermissionOpen((open) => !open)}
           >
-            <Check
+            <Check className="h-3.5 w-3.5 opacity-0" />
+            <span className="font-medium flex-1 text-left">AI读写权限</span>
+            <ChevronRight
               className={cn(
-                "h-3.5 w-3.5",
-                currentPermission === option.value ? "opacity-100" : "opacity-0"
+                "h-3.5 w-3.5 transition-transform",
+                submenuSide === "left" && "rotate-180"
               )}
             />
-            <span className="font-medium">{option.label}</span>
           </button>
-        ))}
+          {permissionOpen && (
+            <div
+              className={cn(
+                "absolute top-[-4px] min-w-[132px] rounded-lg border border-border/60 bg-popover/95 backdrop-blur-md p-1 text-popover-foreground shadow-xl",
+                submenuSide === "right" ? "left-[calc(100%+4px)]" : "right-[calc(100%+4px)]"
+              )}
+            >
+              {AI_PERMISSION_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  className="flex items-center gap-2.5 w-full px-2.5 py-[7px] text-xs rounded-md hover:bg-accent/80 active:scale-[0.98] transition-all"
+                  onClick={() => act(() => onSetPermission(state.id, option.value))}
+                >
+                  <Check
+                    className={cn(
+                      "h-3.5 w-3.5",
+                      currentPermission === option.value ? "opacity-100" : "opacity-0"
+                    )}
+                  />
+                  <span className="font-medium">{option.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </>
     );
 
-  return (
+  return createPortal(
     <div
       ref={menuRef}
       style={style}
-      className="min-w-[170px] rounded-lg border border-border/60 bg-popover/95 backdrop-blur-md p-1 text-popover-foreground shadow-xl animate-in fade-in-0 zoom-in-95"
+      className="min-w-[188px] rounded-lg border border-border/60 bg-popover/95 backdrop-blur-md p-1 text-popover-foreground shadow-xl animate-in fade-in-0 zoom-in-95"
     >
       {state.type === "folder" ? (
         <>
@@ -298,7 +335,8 @@ function ContextMenuFlyout({
           </button>
         </>
       )}
-    </div>
+    </div>,
+    document.body
   );
 }
 
