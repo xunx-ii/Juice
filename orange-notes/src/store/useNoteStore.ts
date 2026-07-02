@@ -15,9 +15,27 @@ interface PersistedData {
   deletedFolders: string[];
 }
 
+export interface SyncCheckpoint {
+  dirtyNotes: Set<string>;
+  dirtyFolders: Set<string>;
+  deletedNotes: Set<string>;
+  deletedFolders: Set<string>;
+}
+
 type NotePatch = Partial<
   Pick<Note, "title" | "content" | "folder" | "sortOrder" | "pinned" | "favorite" | "aiPermission">
 >;
+
+interface SyncMarkerBackup {
+  dirtyNotes: string[];
+  dirtyFolders: string[];
+  deletedNotes: string[];
+  deletedFolders: string[];
+}
+
+const SYNC_MARKER_BACKUP_KEY = "orange-notes-sync-marker-backup";
+const CONFLICT_FOLDER_ID = "sync-conflicts";
+const CONFLICT_FOLDER_NAME = "同步冲突";
 
 interface NoteStore {
   folders: Folder[];
@@ -56,9 +74,11 @@ interface NoteStore {
 
   // Sync helpers
   getSyncPayload: () => Promise<RemoteNotebookState>;
+  getSyncCheckpoint: () => SyncCheckpoint;
   applyRemoteChanges: (state: RemoteNotebookState) => Promise<void>;
   mergeRemoteSnapshot: (state: RemoteNotebookState) => Promise<void>;
-  markSynced: (version: number) => Promise<void>;
+  markAllLocalContentDirty: () => Promise<void>;
+  markSynced: (version: number, checkpoint: SyncCheckpoint) => Promise<void>;
   hasContent: () => boolean;
   hasLocalChanges: () => boolean;
 }
@@ -80,17 +100,65 @@ async function loadNotebook(): Promise<PersistedData> {
   return invoke<PersistedData>("load_notebook");
 }
 
+function markerBackupFromSets(state: Pick<NoteStore, "dirtyNotes" | "dirtyFolders" | "deletedNotes" | "deletedFolders">): SyncMarkerBackup {
+  return {
+    dirtyNotes: Array.from(state.dirtyNotes),
+    dirtyFolders: Array.from(state.dirtyFolders),
+    deletedNotes: Array.from(state.deletedNotes),
+    deletedFolders: Array.from(state.deletedFolders),
+  };
+}
+
+function readMarkerBackup(): SyncMarkerBackup | null {
+  try {
+    const raw = localStorage.getItem(SYNC_MARKER_BACKUP_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SyncMarkerBackup>;
+    return {
+      dirtyNotes: parsed.dirtyNotes ?? [],
+      dirtyFolders: parsed.dirtyFolders ?? [],
+      deletedNotes: parsed.deletedNotes ?? [],
+      deletedFolders: parsed.deletedFolders ?? [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeMarkerBackup(markers: SyncMarkerBackup) {
+  localStorage.setItem(SYNC_MARKER_BACKUP_KEY, JSON.stringify(markers));
+}
+
+function clearMarkerBackup() {
+  localStorage.removeItem(SYNC_MARKER_BACKUP_KEY);
+}
+
+function mergeMarkerBackup(data: PersistedData): PersistedData {
+  const backup = readMarkerBackup();
+  if (!backup) return data;
+  return {
+    ...data,
+    dirtyNotes: Array.from(new Set([...data.dirtyNotes, ...backup.dirtyNotes])),
+    dirtyFolders: Array.from(new Set([...data.dirtyFolders, ...backup.dirtyFolders])),
+    deletedNotes: Array.from(new Set([...data.deletedNotes, ...backup.deletedNotes])),
+    deletedFolders: Array.from(new Set([...data.deletedFolders, ...backup.deletedFolders])),
+  };
+}
+
 async function persistSyncMarkers() {
   const state = useNoteStore.getState();
+  const markers = markerBackupFromSets(state);
+  writeMarkerBackup(markers);
   try {
     await invoke("set_sync_markers", {
-      dirtyNotes: Array.from(state.dirtyNotes),
-      dirtyFolders: Array.from(state.dirtyFolders),
-      deletedNotes: Array.from(state.deletedNotes),
-      deletedFolders: Array.from(state.deletedFolders),
+      dirtyNotes: markers.dirtyNotes,
+      dirtyFolders: markers.dirtyFolders,
+      deletedNotes: markers.deletedNotes,
+      deletedFolders: markers.deletedFolders,
     });
+    clearMarkerBackup();
   } catch (error) {
-    console.warn("Failed to persist sync markers", error);
+    console.warn("Failed to persist sync markers in SQLite; local backup retained", error);
   }
 }
 
@@ -143,7 +211,9 @@ function payloadToLocal(state: RemoteNotebookState) {
 function localToPayload(
   folders: Folder[],
   notes: Note[],
-  version: number
+  version: number,
+  deletedNotes: Iterable<string> = [],
+  deletedFolders: Iterable<string> = []
 ): RemoteNotebookState {
   return {
     folders: folders.map((f) => ({
@@ -167,6 +237,8 @@ function localToPayload(
       ai_permission: n.aiPermission,
     })),
     version,
+    deleted_note_ids: Array.from(deletedNotes),
+    deleted_folder_ids: Array.from(deletedFolders),
   };
 }
 
@@ -213,6 +285,36 @@ function collectChangedFolderIds(previous: Folder[], next: Folder[]): Set<string
   return changed;
 }
 
+function maxRootFolderSortOrder(folders: Iterable<Folder>) {
+  let max = -1;
+  for (const folder of folders) {
+    if (folder.parentId === null) max = Math.max(max, folder.sortOrder);
+  }
+  return max;
+}
+
+function ensureConflictFolder(foldersById: Map<string, Folder>): Folder {
+  const existing = foldersById.get(CONFLICT_FOLDER_ID);
+  if (existing) return existing;
+  const folder: Folder = {
+    id: CONFLICT_FOLDER_ID,
+    name: CONFLICT_FOLDER_NAME,
+    sortOrder: maxRootFolderSortOrder(foldersById.values()) + 1,
+    parentId: null,
+    aiPermission: "write",
+  };
+  foldersById.set(folder.id, folder);
+  return folder;
+}
+
+function removeCheckpoint<T>(current: Set<T>, checkpoint: Set<T>): Set<T> {
+  return new Set([...current].filter((value) => !checkpoint.has(value)));
+}
+
+function unique(values: Iterable<string>): string[] {
+  return Array.from(new Set(values));
+}
+
 export const useNoteStore = create<NoteStore>((set, get) => ({
   folders: [],
   notes: [],
@@ -232,7 +334,7 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
   initialize: async () => {
     try {
       set({ loading: true, error: null });
-      const data = await loadNotebook();
+      const data = mergeMarkerBackup(await loadNotebook());
       // Only expand root-level folders by default so nested folders start
       // collapsed and the tree doesn't overwhelm the user.
       const defaultExpanded = new Set(
@@ -545,20 +647,44 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
   },
 
   getSyncPayload: async (): Promise<RemoteNotebookState> => {
-    const { folders, notes } = get();
-    return localToPayload(folders, notes, Date.now());
+    const { folders, notes, deletedNotes, deletedFolders } = get();
+    return localToPayload(folders, notes, Date.now(), deletedNotes, deletedFolders);
+  },
+
+  getSyncCheckpoint: (): SyncCheckpoint => {
+    const state = get();
+    return {
+      dirtyNotes: new Set(state.dirtyNotes),
+      dirtyFolders: new Set(state.dirtyFolders),
+      deletedNotes: new Set(state.deletedNotes),
+      deletedFolders: new Set(state.deletedFolders),
+    };
   },
 
   applyRemoteChanges: async (state: RemoteNotebookState) => {
     const { folders, notes } = payloadToLocal(state);
+    const local = get();
+    const remoteFolderIds = new Set(folders.map((folder) => folder.id));
+    const remoteNoteIds = new Set(notes.map((note) => note.id));
 
     const deletedImages = await invoke<string[]>("apply_remote_notebook", {
       remoteFolders: state.folders,
       remoteNotes: state.notes,
       version: state.version,
       clearChanges: true,
+      deletedNoteIds: unique([
+        ...local.notes.filter((note) => !remoteNoteIds.has(note.id)).map((note) => note.id),
+        ...(state.deleted_note_ids ?? []),
+      ]),
+      deletedFolderIds: unique([
+        ...local.folders
+          .filter((folder) => !remoteFolderIds.has(folder.id))
+          .map((folder) => folder.id),
+        ...(state.deleted_folder_ids ?? []),
+      ]),
     });
     notifyNoteImagesDeleted(deletedImages);
+    clearMarkerBackup();
 
     set({
       folders,
@@ -582,16 +708,32 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
     for (const folder of local.folders) {
       if (local.dirtyFolders.has(folder.id)) foldersById.set(folder.id, folder);
     }
+    for (const folderId of state.deleted_folder_ids ?? []) foldersById.delete(folderId);
     for (const folderId of local.deletedFolders) foldersById.delete(folderId);
 
     const folderIds = new Set(foldersById.keys());
     const notesById = new Map<string, Note>();
+    const remoteNoteIds = new Set(remote.notes.map((note) => note.id));
+    const preservedDirtyNoteIds = new Set<string>();
+    let conflictFolderWasCreated = false;
     for (const note of remote.notes) {
       if (folderIds.has(note.folder)) notesById.set(note.id, note);
     }
+    for (const noteId of state.deleted_note_ids ?? []) notesById.delete(noteId);
     for (const note of local.notes) {
-      if (!folderIds.has(note.folder) || !local.dirtyNotes.has(note.id)) continue;
-      notesById.set(note.id, note);
+      const shouldPreserve =
+        local.dirtyNotes.has(note.id) ||
+        (!remoteNoteIds.has(note.id) && note.updatedAt > local.syncVersion);
+      if (!shouldPreserve) continue;
+      preservedDirtyNoteIds.add(note.id);
+      let localNote = note;
+      if (!folderIds.has(localNote.folder)) {
+        conflictFolderWasCreated = !foldersById.has(CONFLICT_FOLDER_ID);
+        const conflictFolder = ensureConflictFolder(foldersById);
+        folderIds.add(conflictFolder.id);
+        localNote = { ...localNote, folder: conflictFolder.id };
+      }
+      notesById.set(localNote.id, localNote);
     }
     for (const noteId of local.deletedNotes) notesById.delete(noteId);
 
@@ -604,9 +746,23 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
           a.sortOrder - b.sortOrder ||
           b.updatedAt - a.updatedAt
       );
+    const finalFolderIds = new Set(folders.map((folder) => folder.id));
+    const finalNoteIds = new Set(notes.map((note) => note.id));
+    const deletedFolderIds = unique([
+      ...local.folders
+        .filter((folder) => !finalFolderIds.has(folder.id))
+        .map((folder) => folder.id),
+      ...(state.deleted_folder_ids ?? []),
+      ...local.deletedFolders,
+    ]);
+    const deletedNoteIds = unique([
+      ...local.notes.filter((note) => !finalNoteIds.has(note.id)).map((note) => note.id),
+      ...(state.deleted_note_ids ?? []),
+      ...local.deletedNotes,
+    ]);
     const payload = {
       ...state,
-      ...localToPayload(folders, notes, state.version),
+      ...localToPayload(folders, notes, state.version, local.deletedNotes, local.deletedFolders),
     };
 
     const deletedImages = await invoke<string[]>("apply_remote_notebook", {
@@ -614,6 +770,8 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
       remoteNotes: payload.notes,
       version: state.version,
       clearChanges: false,
+      deletedNoteIds,
+      deletedFolderIds,
     });
     notifyNoteImagesDeleted(deletedImages);
 
@@ -621,18 +779,44 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
       folders,
       notes,
       syncVersion: state.version,
+      dirtyNotes: new Set([...local.dirtyNotes, ...preservedDirtyNoteIds]),
+      dirtyFolders: new Set([
+        ...local.dirtyFolders,
+        ...(conflictFolderWasCreated ? [CONFLICT_FOLDER_ID] : []),
+      ]),
     });
+    await persistSyncMarkers();
   },
 
-  markSynced: async (version: number) => {
-    await invoke("set_sync_version", { version });
-    set({
+  markAllLocalContentDirty: async () => {
+    set((state) => ({
+      dirtyNotes: new Set([...state.dirtyNotes, ...state.notes.map((note) => note.id)]),
+      dirtyFolders: new Set([
+        ...state.dirtyFolders,
+        ...state.folders.map((folder) => folder.id),
+      ]),
+    }));
+    await persistSyncMarkers();
+  },
+
+  markSynced: async (version: number, checkpoint: SyncCheckpoint) => {
+    set((state) => ({
       syncVersion: version,
-      dirtyNotes: new Set<string>(),
-      dirtyFolders: new Set<string>(),
-      deletedNotes: new Set<string>(),
-      deletedFolders: new Set<string>(),
+      dirtyNotes: removeCheckpoint(state.dirtyNotes, checkpoint.dirtyNotes),
+      dirtyFolders: removeCheckpoint(state.dirtyFolders, checkpoint.dirtyFolders),
+      deletedNotes: removeCheckpoint(state.deletedNotes, checkpoint.deletedNotes),
+      deletedFolders: removeCheckpoint(state.deletedFolders, checkpoint.deletedFolders),
+    }));
+    await invoke("set_sync_version", {
+      version,
+      changes: {
+        syncedDirtyNotes: Array.from(checkpoint.dirtyNotes),
+        syncedDirtyFolders: Array.from(checkpoint.dirtyFolders),
+        syncedDeletedNotes: Array.from(checkpoint.deletedNotes),
+        syncedDeletedFolders: Array.from(checkpoint.deletedFolders),
+      },
     });
+    await persistSyncMarkers();
   },
 
   hasContent: () => get().folders.length > 0 || get().notes.length > 0,

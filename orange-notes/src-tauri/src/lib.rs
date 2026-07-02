@@ -74,6 +74,15 @@ struct NotebookData {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SyncedChanges {
+    synced_dirty_notes: Vec<String>,
+    synced_dirty_folders: Vec<String>,
+    synced_deleted_notes: Vec<String>,
+    synced_deleted_folders: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct NotePatch {
     title: Option<String>,
     content: Option<String>,
@@ -288,44 +297,29 @@ fn apply_remote_notebook(
     remote_notes: Vec<RemoteNoteArg>,
     version: i64,
     clear_changes: bool,
+    deleted_note_ids: Option<Vec<String>>,
+    deleted_folder_ids: Option<Vec<String>>,
 ) -> Result<Vec<String>, AppError> {
     let mut conn = state.db.lock().expect("database mutex poisoned");
-    let previous_images = {
-        let mut stmt = conn.prepare("SELECT content FROM notes")?;
-        let contents = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut images = HashSet::new();
-        for content in contents {
-            images.extend(extract_image_file_names(&content));
-        }
-        images
-    };
-
-    let mut remote_images = HashSet::new();
-    for note in &remote_notes {
-        remote_images.extend(extract_image_file_names(&note.content));
-    }
-    let removed_images = previous_images
-        .difference(&remote_images)
-        .cloned()
-        .collect::<HashSet<_>>();
-    let mut cleanup_candidates = removed_images;
-    for file_name in local_image_file_names(&state.img_dir)? {
-        if !remote_images.contains(&file_name) {
-            cleanup_candidates.insert(file_name);
-        }
-    }
-
     let tx = conn.transaction()?;
 
-    tx.execute("DELETE FROM notes", [])?;
-    tx.execute("DELETE FROM folders", [])?;
+    for note_id in deleted_note_ids.unwrap_or_default() {
+        tx.execute("DELETE FROM notes WHERE id = $1", params![note_id])?;
+    }
+    for folder_id in deleted_folder_ids.unwrap_or_default() {
+        tx.execute("DELETE FROM notes WHERE folder = $1", params![folder_id])?;
+        tx.execute("DELETE FROM folders WHERE id = $1", params![folder_id])?;
+    }
 
     for f in &remote_folders {
         tx.execute(
             "INSERT INTO folders (id, name, sort_order, parent_id, ai_permission)
-             VALUES ($1, $2, $3, $4, $5)",
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT(id) DO UPDATE SET
+               name = excluded.name,
+               sort_order = excluded.sort_order,
+               parent_id = excluded.parent_id,
+               ai_permission = excluded.ai_permission",
             params![
                 f.id,
                 f.name,
@@ -339,7 +333,17 @@ fn apply_remote_notebook(
     for n in &remote_notes {
         tx.execute(
             "INSERT INTO notes (id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite, ai_permission)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT(id) DO UPDATE SET
+               title = excluded.title,
+               content = excluded.content,
+               folder = excluded.folder,
+               created_at = excluded.created_at,
+               updated_at = excluded.updated_at,
+               sort_order = excluded.sort_order,
+               pinned = excluded.pinned,
+               favorite = excluded.favorite,
+               ai_permission = excluded.ai_permission",
             params![
                 n.id,
                 n.title,
@@ -365,11 +369,15 @@ fn apply_remote_notebook(
         tx.execute("DELETE FROM sync_changes", [])?;
     }
     tx.commit()?;
-    cleanup_unreferenced_images(&conn, &state.img_dir, cleanup_candidates)
+    Ok(Vec::new())
 }
 
 #[tauri::command]
-fn set_sync_version(state: tauri::State<'_, AppState>, version: i64) -> Result<(), AppError> {
+fn set_sync_version(
+    state: tauri::State<'_, AppState>,
+    version: i64,
+    changes: Option<SyncedChanges>,
+) -> Result<(), AppError> {
     let mut conn = state.db.lock().expect("database mutex poisoned");
     let tx = conn.transaction()?;
     tx.execute(
@@ -378,7 +386,34 @@ fn set_sync_version(state: tauri::State<'_, AppState>, version: i64) -> Result<(
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![version],
     )?;
-    tx.execute("DELETE FROM sync_changes", [])?;
+    if let Some(changes) = changes {
+        for id in changes.synced_dirty_notes {
+            tx.execute(
+                "DELETE FROM sync_changes WHERE entity_type = 'note' AND entity_id = $1 AND operation = 'dirty'",
+                params![id],
+            )?;
+        }
+        for id in changes.synced_dirty_folders {
+            tx.execute(
+                "DELETE FROM sync_changes WHERE entity_type = 'folder' AND entity_id = $1 AND operation = 'dirty'",
+                params![id],
+            )?;
+        }
+        for id in changes.synced_deleted_notes {
+            tx.execute(
+                "DELETE FROM sync_changes WHERE entity_type = 'note' AND entity_id = $1 AND operation = 'deleted'",
+                params![id],
+            )?;
+        }
+        for id in changes.synced_deleted_folders {
+            tx.execute(
+                "DELETE FROM sync_changes WHERE entity_type = 'folder' AND entity_id = $1 AND operation = 'deleted'",
+                params![id],
+            )?;
+        }
+    } else {
+        tx.execute("DELETE FROM sync_changes", [])?;
+    }
     tx.commit()?;
     Ok(())
 }

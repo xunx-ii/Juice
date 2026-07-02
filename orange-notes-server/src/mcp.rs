@@ -564,6 +564,7 @@ async fn delete_note(
     if state.notes.len() == before {
         return Err(format!("note not found: {id}"));
     }
+    state.deleted_note_ids.push(id.clone());
     let version = save_state(db, user_id, state, base_version).await?;
     Ok(json!({ "id": id, "deleted": true, "version": version }))
 }

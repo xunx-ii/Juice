@@ -6,11 +6,11 @@ import { useNoteStore } from "../store/useNoteStore";
 import { showToast } from "@/store/useToastStore";
 import {
   notifyNoteImageAvailable,
-  notifyNoteImagesDeleted,
 } from "@/lib/noteImageEvents";
 
 const IMAGE_TOKEN_RE = /!\[\[([^\]\r\n]+)\]\]/g;
 const STORAGE_KEY = "orange-notes-sync-settings";
+const SYNC_IDENTITY_KEY = "orange-notes-sync-identity";
 const PUSH_DELAY_MS = 300;
 const RECONNECT_MIN_DELAY_MS = 1_500;
 const RECONNECT_MAX_DELAY_MS = 15_000;
@@ -70,6 +70,27 @@ export function saveSyncSettings(settings: SyncSettings) {
 
 function hasCompleteSettings(settings: SyncSettings) {
   return Boolean(settings.address && settings.username && settings.password);
+}
+
+function syncIdentity(settings: SyncSettings) {
+  const address = settings.address.trim().replace(/\/+$/, "").toLowerCase();
+  return `${address}::${settings.username.trim().toLowerCase()}`;
+}
+
+function readBoundIdentity(): string | null {
+  try {
+    return localStorage.getItem(SYNC_IDENTITY_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeBoundIdentity(identity: string) {
+  localStorage.setItem(SYNC_IDENTITY_KEY, identity);
+}
+
+function clearBoundIdentity() {
+  localStorage.removeItem(SYNC_IDENTITY_KEY);
 }
 
 function extractImageTokens(content: string): string[] {
@@ -135,7 +156,12 @@ function scheduleReconnect() {
 }
 
 async function applyRemoteState(message: RemoteStateMessage) {
-  await useNoteStore.getState().applyRemoteChanges(message.state);
+  const noteStore = useNoteStore.getState();
+  if (noteStore.hasContent() && !noteStore.hasLocalChanges()) {
+    await noteStore.mergeRemoteSnapshot(message.state);
+  } else {
+    await noteStore.applyRemoteChanges(message.state);
+  }
   await useSyncStore.getState().cleanupLocalImages();
   await useSyncStore.getState().downloadNewImages(filterReferencedAttachments(message));
   useSyncStore.setState({
@@ -157,7 +183,21 @@ async function applyIncomingState(message: RemoteStateMessage) {
   const localVersion = noteStore.syncVersion;
 
   const store = useSyncStore.getState();
+  const identity = syncIdentity(store.settings);
+  const boundIdentity = readBoundIdentity();
+  if (boundIdentity && boundIdentity !== identity && noteStore.hasContent()) {
+    await noteStore.markAllLocalContentDirty();
+    await useNoteStore.getState().mergeRemoteSnapshot(message.state);
+    writeBoundIdentity(identity);
+    store.schedulePush();
+    useSyncStore.setState({
+      lastError: "同步配置已切换，本地内容已保留并等待上传到新位置",
+    });
+    return;
+  }
+
   if (message.state.version === 0 && localVersion === 0 && noteStore.hasContent()) {
+    writeBoundIdentity(identity);
     store.schedulePush();
     return;
   }
@@ -179,6 +219,7 @@ async function applyIncomingState(message: RemoteStateMessage) {
   }
 
   await applyRemoteState(message);
+  writeBoundIdentity(identity);
 }
 
 export const useSyncStore = create<SyncStore>((set, get) => ({
@@ -206,6 +247,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   resetSettings: () => {
     clearPushTimer();
     clearReconnectTimer();
+    clearBoundIdentity();
     saveSyncSettings({ address: "", username: "", password: "" });
     set({
       settings: { address: "", username: "", password: "" },
@@ -272,9 +314,11 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
       for (let attempt = 0; attempt < MAX_PUSH_ATTEMPTS; attempt += 1) {
         const noteStore = useNoteStore.getState();
         const payload = await noteStore.getSyncPayload();
+        const checkpoint = noteStore.getSyncCheckpoint();
         const result = await syncClient.push(payload, noteStore.syncVersion);
         if (result.accepted) {
-          await useNoteStore.getState().markSynced(result.version);
+          await useNoteStore.getState().markSynced(result.version, checkpoint);
+          writeBoundIdentity(syncIdentity(get().settings));
           break;
         }
 
@@ -349,12 +393,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   },
 
   cleanupLocalImages: async () => {
-    try {
-      const deletedImages = await invoke<string[]>("cleanup_unreferenced_note_images");
-      notifyNoteImagesDeleted(deletedImages);
-    } catch (error) {
-      console.warn("Failed to cleanup local note images", error);
-    }
+    // Sync must never garbage-collect local images implicitly; explicit user edits still clean up.
   },
 
   downloadImage: async (fileName, mime) => {

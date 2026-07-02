@@ -28,6 +28,8 @@ export interface RemoteNotebookState {
   folders: RemoteFolder[];
   notes: RemoteNote[];
   version: number;
+  deleted_note_ids?: string[];
+  deleted_folder_ids?: string[];
 }
 
 export type ClientMessage =

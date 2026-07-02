@@ -52,6 +52,10 @@ pub struct NotebookState {
     pub folders: Vec<Folder>,
     pub notes: Vec<Note>,
     pub version: i64,
+    #[serde(default)]
+    pub deleted_note_ids: Vec<String>,
+    #[serde(default)]
+    pub deleted_folder_ids: Vec<String>,
 }
 
 pub struct Database {
@@ -306,6 +310,8 @@ impl Database {
                 folders,
                 notes,
                 version,
+                deleted_note_ids: Vec::new(),
+                deleted_folder_ids: Vec::new(),
             })
         }).await
     }
@@ -541,19 +547,34 @@ impl Database {
             .max()
             .unwrap_or(1);
 
-            tx.execute("DELETE FROM notes WHERE user_id = ?1", params![user_id.clone()])?;
-            tx.execute("DELETE FROM folders WHERE user_id = ?1", params![user_id.clone()])?;
-
-            let referenced_attachments = state
-                .notes
-                .iter()
-                .flat_map(|note| extract_image_file_names(&note.content))
-                .collect::<HashSet<_>>();
+            for note_id in &state.deleted_note_ids {
+                tx.execute(
+                    "DELETE FROM notes WHERE user_id = ?1 AND id = ?2",
+                    params![user_id.clone(), note_id],
+                )?;
+            }
+            for folder_id in &state.deleted_folder_ids {
+                tx.execute(
+                    "DELETE FROM notes WHERE user_id = ?1 AND folder = ?2",
+                    params![user_id.clone(), folder_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM folders WHERE user_id = ?1 AND id = ?2",
+                    params![user_id.clone(), folder_id],
+                )?;
+            }
 
             for folder in state.folders {
                 tx.execute(
                     "INSERT INTO folders (id, name, sort_order, parent_id, updated_at, user_id, ai_permission)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(id) DO UPDATE SET
+                       name = excluded.name,
+                       sort_order = excluded.sort_order,
+                       parent_id = excluded.parent_id,
+                       updated_at = excluded.updated_at,
+                       user_id = excluded.user_id,
+                       ai_permission = excluded.ai_permission",
                     params![
                         folder.id,
                         folder.name,
@@ -569,7 +590,18 @@ impl Database {
             for note in state.notes {
                 tx.execute(
                     "INSERT INTO notes (id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite, user_id, ai_permission)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                     ON CONFLICT(id) DO UPDATE SET
+                       title = excluded.title,
+                       content = excluded.content,
+                       folder = excluded.folder,
+                       created_at = excluded.created_at,
+                       updated_at = excluded.updated_at,
+                       sort_order = excluded.sort_order,
+                       pinned = excluded.pinned,
+                       favorite = excluded.favorite,
+                       user_id = excluded.user_id,
+                       ai_permission = excluded.ai_permission",
                     params![
                         note.id,
                         note.title,
@@ -583,24 +615,6 @@ impl Database {
                         user_id.clone(),
                         normalize_ai_permission(&note.ai_permission),
                     ],
-                )?;
-            }
-
-            let existing_attachments = {
-                let mut stmt =
-                    tx.prepare("SELECT file_name FROM attachments WHERE user_id = ?1")?;
-                let file_names = stmt
-                    .query_map(params![user_id.clone()], |row| row.get::<_, String>(0))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                file_names
-            };
-            for file_name in existing_attachments {
-                if referenced_attachments.contains(&file_name) {
-                    continue;
-                }
-                tx.execute(
-                    "DELETE FROM attachments WHERE user_id = ?1 AND file_name = ?2",
-                    params![user_id.clone(), file_name],
                 )?;
             }
 
