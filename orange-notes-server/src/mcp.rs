@@ -210,89 +210,107 @@ fn initialize_result(message: &Value) -> Value {
 
 fn tools() -> Value {
     json!([
-        {
-            "name": "list_folders",
-            "description": "List folders in Orange Notes.",
-            "inputSchema": {
+        tool_definition(
+            "list_folders",
+            "List folders in Orange Notes.",
+            json!({
                 "type": "object",
                 "properties": {},
                 "additionalProperties": false
-            }
-        },
-        {
-            "name": "list_notes",
-            "description": "List note metadata with bounded previews. Pass limit/offset or page/pageSize to page through results. Full content is not returned; use get_note for one note's content.",
-            "inputSchema": {
+            }),
+        ),
+        tool_definition(
+            "list_notes",
+            "List note metadata with bounded previews. Supports limit/offset and page/pageSize pagination. Full content is not returned; use get_note for one note's content.",
+            json!({
                 "type": "object",
                 "properties": {
                     "folderId": { "type": "string", "description": "Filter by folder id." },
+                    "folder_id": { "type": "string", "description": "Alias for folderId." },
                     "folderName": { "type": "string", "description": "Filter by folder name when folderId is not available." },
+                    "folder_name": { "type": "string", "description": "Alias for folderName." },
                     "query": { "type": "string", "description": "Search title and content." },
                     "includeContent": { "type": "boolean", "description": "Deprecated compatibility flag; bulk lists always omit full content." },
+                    "include_content": { "type": "boolean", "description": "Alias for includeContent." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 200, "description": "Page size controlled by the MCP client. Defaults to 50 and caps at 200." },
                     "offset": { "type": "integer", "minimum": 0, "description": "Zero-based result offset controlled by the MCP client. Use nextOffset from the previous response to fetch the next page." },
                     "page": { "type": "integer", "minimum": 1, "description": "One-based page number. Used only when offset is omitted." },
-                    "pageSize": { "type": "integer", "minimum": 1, "maximum": 200, "description": "Alias for limit." }
+                    "pageSize": { "type": "integer", "minimum": 1, "maximum": 200, "description": "Alias for limit." },
+                    "page_size": { "type": "integer", "minimum": 1, "maximum": 200, "description": "Alias for pageSize." }
                 },
                 "additionalProperties": false
-            }
-        },
-        {
-            "name": "get_note",
-            "description": "Get one note by id.",
-            "inputSchema": {
+            }),
+        ),
+        tool_definition(
+            "get_note",
+            "Get one note by id.",
+            json!({
                 "type": "object",
                 "properties": { "id": { "type": "string" } },
                 "required": ["id"],
                 "additionalProperties": false
-            }
-        },
-        {
-            "name": "create_note",
-            "description": "Create a note. If no folder is provided, the first root folder is used or created.",
-            "inputSchema": {
+            }),
+        ),
+        tool_definition(
+            "create_note",
+            "Create a note. If no folder is provided, the first root folder is used or created.",
+            json!({
                 "type": "object",
                 "properties": {
                     "title": { "type": "string" },
                     "content": { "type": "string" },
                     "folderId": { "type": "string" },
+                    "folder_id": { "type": "string", "description": "Alias for folderId." },
                     "folderName": { "type": "string" },
+                    "folder_name": { "type": "string", "description": "Alias for folderName." },
                     "pinned": { "type": "boolean" },
                     "favorite": { "type": "boolean" }
                 },
                 "additionalProperties": false
-            }
-        },
-        {
-            "name": "update_note",
-            "description": "Update fields on an existing note.",
-            "inputSchema": {
+            }),
+        ),
+        tool_definition(
+            "update_note",
+            "Update fields on an existing note. folderId/folderName can move the note across folders.",
+            json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string" },
                     "title": { "type": "string" },
                     "content": { "type": "string" },
                     "folderId": { "type": "string" },
+                    "folder_id": { "type": "string", "description": "Alias for folderId." },
                     "folderName": { "type": "string" },
+                    "folder_name": { "type": "string", "description": "Alias for folderName." },
                     "sortOrder": { "type": "integer" },
+                    "sort_order": { "type": "integer", "description": "Alias for sortOrder." },
                     "pinned": { "type": "boolean" },
                     "favorite": { "type": "boolean" }
                 },
                 "required": ["id"],
                 "additionalProperties": false
-            }
-        },
-        {
-            "name": "delete_note",
-            "description": "Delete a note by id.",
-            "inputSchema": {
+            }),
+        ),
+        tool_definition(
+            "delete_note",
+            "Delete a note by id.",
+            json!({
                 "type": "object",
                 "properties": { "id": { "type": "string" } },
                 "required": ["id"],
                 "additionalProperties": false
-            }
-        }
+            }),
+        )
     ])
+}
+
+fn tool_definition(name: &str, description: &str, input_schema: Value) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": input_schema.clone(),
+        "input_schema": input_schema
+    })
 }
 
 async fn list_folders(db: &Database, user_id: &str) -> Result<Value, String> {
