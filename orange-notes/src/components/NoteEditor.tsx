@@ -565,6 +565,7 @@ export function NoteEditor() {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [editTitle, setEditTitle] = useState(false);
+  const [activeTab, setActiveTab] = useState("preview");
   const syncedNoteIdRef = useRef<string | null>(null);
   const contentDirtyRef = useRef(false);
   const titleDirtyRef = useRef(false);
@@ -651,6 +652,7 @@ export function NoteEditor() {
       setContent(activeContent);
       setTitle(activeTitle);
       setEditTitle(false);
+      setActiveTab("preview");
       syncedNoteIdRef.current = activeNoteId;
     }
   }, [activeContent, activeNoteId, activeTitle]);
@@ -963,7 +965,7 @@ export function NoteEditor() {
         }
       />
 
-      <Tabs defaultValue="preview" className="flex-1 flex flex-col min-h-0">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col min-h-0">
         <div className="px-6 pt-2 pb-0 border-b border-border/40">
           <TabsList className="h-9 bg-transparent p-0 gap-1">
             <TabsTrigger
@@ -986,28 +988,30 @@ export function NoteEditor() {
         <TabsContent value="edit" className="flex-1 p-0 m-0 min-h-0 fade-in">
           <div className="h-full flex flex-col">
             <div className="px-8 pt-6 pb-0">
-              {editTitle ? (
-                <Input
-                  value={title}
-                  onChange={(e) => {
-                    titleDirtyRef.current = true;
-                    setTitle(e.target.value);
-                  }}
-                  onBlur={() => setEditTitle(false)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") setEditTitle(false);
-                  }}
-                  className="text-[1.7rem] font-bold tracking-tight border-0 p-0 h-11 leading-tight focus-visible:ring-0 bg-transparent"
-                  autoFocus
-                />
-              ) : (
-                <h2
-                  className="text-[1.7rem] font-bold tracking-tight leading-tight cursor-text hover:bg-muted/40 -ml-2 px-2 py-1 rounded-lg transition-colors text-foreground"
-                  onClick={() => setEditTitle(true)}
-                >
-                  {activeNote.title || "未命名笔记"}
-                </h2>
-              )}
+              <div className="max-w-[72ch] mx-auto">
+                {editTitle ? (
+                  <Input
+                    value={title}
+                    onChange={(e) => {
+                      titleDirtyRef.current = true;
+                      setTitle(e.target.value);
+                    }}
+                    onBlur={() => setEditTitle(false)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") setEditTitle(false);
+                    }}
+                    className="text-[1.7rem] font-bold tracking-tight border-0 p-0 h-11 leading-tight focus-visible:ring-0 bg-transparent"
+                    autoFocus
+                  />
+                ) : (
+                  <h2
+                    className="text-[1.7rem] font-bold tracking-tight leading-tight cursor-text hover:bg-muted/40 -ml-2 px-2 py-1 rounded-lg transition-colors text-foreground"
+                    onClick={() => setEditTitle(true)}
+                  >
+                    {activeNote.title || "未命名笔记"}
+                  </h2>
+                )}
+              </div>
             </div>
             <div className="flex-1 overflow-auto px-8 pb-3 pt-3">
               <div className="max-w-[72ch] mx-auto">
