@@ -90,34 +90,93 @@ impl Database {
 
     pub async fn conn_count(&self, sql: &str) -> Result<i64, rusqlite::Error> {
         let sql = sql.to_string();
-        self.conn(move |conn| {
-            conn.query_row(&sql, [], |row| row.get::<_, i64>(0))
-        }).await
+        self.conn(move |conn| conn.query_row(&sql, [], |row| row.get::<_, i64>(0)))
+            .await
     }
 
     // -----------------------------------------------------------------------
     // Users
     // -----------------------------------------------------------------------
 
-    pub async fn list_users(&self, limit: i64, offset: i64) -> Result<Vec<String>, rusqlite::Error> {
+    pub async fn list_users(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<String>, rusqlite::Error> {
         self.conn(move |conn| {
-            let mut stmt = conn.prepare("SELECT username FROM users ORDER BY username ASC LIMIT ?1 OFFSET ?2")?;
+            let mut stmt = conn
+                .prepare("SELECT username FROM users ORDER BY username ASC LIMIT ?1 OFFSET ?2")?;
             let rows = stmt.query_map(params![limit, offset], |row| row.get::<_, String>(0))?;
             rows.collect::<Result<Vec<_>, _>>()
-        }).await
+        })
+        .await
     }
 
-    pub async fn get_user_password_hash(&self, username: String) -> Result<Option<String>, rusqlite::Error> {
+    pub async fn get_user_password_hash(
+        &self,
+        username: String,
+    ) -> Result<Option<String>, rusqlite::Error> {
         self.conn(move |conn| {
             conn.query_row(
                 "SELECT password_hash FROM users WHERE username = ?1",
                 params![username],
                 |row| row.get::<_, String>(0),
-            ).optional()
+            )
+            .optional()
+        })
+        .await
+    }
+
+    pub async fn get_mcp_token(&self, user_id: &str) -> Result<Option<String>, rusqlite::Error> {
+        let user_id = user_id.to_string();
+        self.conn(move |conn| {
+            conn.query_row(
+                "SELECT token FROM mcp_tokens WHERE user_id = ?1",
+                params![user_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+        })
+        .await
+    }
+
+    pub async fn user_by_mcp_token(&self, token: &str) -> Result<Option<String>, rusqlite::Error> {
+        let token = token.to_string();
+        self.conn(move |conn| {
+            conn.query_row(
+                "SELECT user_id FROM mcp_tokens WHERE token = ?1",
+                params![token],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+        })
+        .await
+    }
+
+    pub async fn generate_mcp_token(&self, user_id: &str) -> Result<String, rusqlite::Error> {
+        let user_id = user_id.to_string();
+        let token = format!(
+            "mcp_{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        self.conn(move |conn| {
+            let now = chrono::Utc::now().timestamp_millis();
+            conn.execute(
+                "INSERT INTO mcp_tokens (user_id, token, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?3)
+                 ON CONFLICT(user_id) DO UPDATE SET token = excluded.token, updated_at = excluded.updated_at",
+                params![user_id, token, now],
+            )?;
+            Ok(token)
         }).await
     }
 
-    pub async fn create_user(&self, username: String, password_hash: String) -> Result<(), rusqlite::Error> {
+    pub async fn create_user(
+        &self,
+        username: String,
+        password_hash: String,
+    ) -> Result<(), rusqlite::Error> {
         self.conn(move |conn| {
             let tx = conn.transaction()?;
             tx.execute(
@@ -129,20 +188,35 @@ impl Database {
                 params![username],
             )?;
             tx.commit()
-        }).await
+        })
+        .await
     }
 
     /// Delete a user and all data owned by that user.
     pub async fn delete_user(&self, username: &str) -> Result<bool, rusqlite::Error> {
         let username = username.to_string();
         self.conn(move |conn| {
-            conn.execute("DELETE FROM notes WHERE user_id = ?1", params![username.clone()])?;
-            conn.execute("DELETE FROM folders WHERE user_id = ?1", params![username.clone()])?;
-            conn.execute("DELETE FROM attachments WHERE user_id = ?1", params![username.clone()])?;
-            conn.execute("DELETE FROM sync_meta WHERE user_id = ?1", params![username.clone()])?;
-            let deleted = conn.execute("DELETE FROM users WHERE username = ?1", params![username])?;
+            conn.execute(
+                "DELETE FROM notes WHERE user_id = ?1",
+                params![username.clone()],
+            )?;
+            conn.execute(
+                "DELETE FROM folders WHERE user_id = ?1",
+                params![username.clone()],
+            )?;
+            conn.execute(
+                "DELETE FROM attachments WHERE user_id = ?1",
+                params![username.clone()],
+            )?;
+            conn.execute(
+                "DELETE FROM sync_meta WHERE user_id = ?1",
+                params![username.clone()],
+            )?;
+            let deleted =
+                conn.execute("DELETE FROM users WHERE username = ?1", params![username])?;
             Ok(deleted > 0)
-        }).await
+        })
+        .await
     }
 
     // -----------------------------------------------------------------------
@@ -315,8 +389,13 @@ impl Database {
     pub async fn note_count(&self, user_id: &str) -> Result<i64, rusqlite::Error> {
         let user_id = user_id.to_string();
         self.conn(move |conn| {
-            conn.query_row("SELECT COUNT(*) FROM notes WHERE user_id = ?1", params![user_id], |row| row.get::<_, i64>(0))
-        }).await
+            conn.query_row(
+                "SELECT COUNT(*) FROM notes WHERE user_id = ?1",
+                params![user_id],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .await
     }
 
     // -----------------------------------------------------------------------
@@ -342,13 +421,23 @@ impl Database {
                    mime = excluded.mime,
                    data = excluded.data,
                    updated_at = excluded.updated_at",
-                params![user_id, file_name, mime, data, chrono::Utc::now().timestamp_millis()],
+                params![
+                    user_id,
+                    file_name,
+                    mime,
+                    data,
+                    chrono::Utc::now().timestamp_millis()
+                ],
             )?;
             Ok(())
-        }).await
+        })
+        .await
     }
 
-    pub async fn list_attachments(&self, user_id: &str) -> Result<Vec<(String, String)>, rusqlite::Error> {
+    pub async fn list_attachments(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<(String, String)>, rusqlite::Error> {
         let user_id = user_id.to_string();
         self.conn(move |conn| {
             let referenced = {
@@ -366,7 +455,9 @@ impl Database {
                 return Ok(Vec::new());
             }
 
-            let mut stmt = conn.prepare("SELECT file_name, mime FROM attachments WHERE user_id = ?1 ORDER BY file_name ASC")?;
+            let mut stmt = conn.prepare(
+                "SELECT file_name, mime FROM attachments WHERE user_id = ?1 ORDER BY file_name ASC",
+            )?;
             let rows = stmt.query_map(params![user_id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
@@ -376,10 +467,15 @@ impl Database {
                 .filter(|(file_name, _)| referenced.contains(file_name))
                 .collect();
             Ok(files)
-        }).await
+        })
+        .await
     }
 
-    pub async fn get_attachment(&self, user_id: &str, file_name: &str) -> Result<Option<(String, Vec<u8>)>, rusqlite::Error> {
+    pub async fn get_attachment(
+        &self,
+        user_id: &str,
+        file_name: &str,
+    ) -> Result<Option<(String, Vec<u8>)>, rusqlite::Error> {
         let user_id = user_id.to_string();
         let file_name = file_name.to_string();
         self.conn(move |conn| {
@@ -387,11 +483,17 @@ impl Database {
                 "SELECT mime, data FROM attachments WHERE user_id = ?1 AND file_name = ?2",
                 params![user_id, file_name],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            ).optional()
-        }).await
+            )
+            .optional()
+        })
+        .await
     }
 
-    pub async fn delete_attachment(&self, user_id: &str, file_name: &str) -> Result<(), rusqlite::Error> {
+    pub async fn delete_attachment(
+        &self,
+        user_id: &str,
+        file_name: &str,
+    ) -> Result<(), rusqlite::Error> {
         let user_id = user_id.to_string();
         let file_name = file_name.to_string();
         self.conn(move |conn| {
@@ -400,12 +502,14 @@ impl Database {
                 params![user_id, file_name],
             )?;
             Ok(())
-        }).await
+        })
+        .await
     }
 }
 
 fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         PRAGMA journal_mode = WAL;
         PRAGMA foreign_keys = ON;
 
@@ -450,5 +554,14 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           user_id TEXT PRIMARY KEY,
           version INTEGER NOT NULL
         );
-    ")
+
+        CREATE TABLE IF NOT EXISTS mcp_tokens (
+          user_id TEXT PRIMARY KEY,
+          token TEXT NOT NULL UNIQUE,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY(user_id) REFERENCES users(username) ON DELETE CASCADE
+        );
+    ",
+    )
 }

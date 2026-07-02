@@ -15,6 +15,7 @@ mod attachments;
 mod auth;
 mod db;
 mod health;
+mod mcp;
 mod sync;
 
 use db::Database;
@@ -72,10 +73,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/admin/register", post(admin::register_user))
         .route("/api/admin/users/:username", delete(admin::delete_user))
         // File/attachment sync (HTTP binary, no admin token needed)
-        .route("/api/sync/files/:username", get(attachments::list_attachments))
-        .route("/api/sync/files/:username/:filename", get(attachments::download_attachment))
-        .route("/api/sync/files/:username/:filename", post(attachments::upload_attachment))
-        .route("/api/sync/files/:username/:filename", delete(attachments::delete_attachment))
+        .route(
+            "/api/sync/files/:username",
+            get(attachments::list_attachments),
+        )
+        .route(
+            "/api/sync/files/:username/:filename",
+            get(attachments::download_attachment),
+        )
+        .route(
+            "/api/sync/files/:username/:filename",
+            post(attachments::upload_attachment),
+        )
+        .route(
+            "/api/sync/files/:username/:filename",
+            delete(attachments::delete_attachment),
+        )
+        .route("/api/sync/mcp-token/:username", get(mcp::get_token))
+        .route("/api/sync/mcp-token/:username", post(mcp::generate_token))
+        .route("/mcp", get(mcp::mcp_info))
+        .route("/mcp", post(mcp::mcp_handler))
         // WebSocket sync
         .route("/ws/:username", get(sync::ws_handler))
         // Admin dashboard (static HTML) — merge routes so it shares state

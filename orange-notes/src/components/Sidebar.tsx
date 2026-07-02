@@ -10,13 +10,16 @@ import {
   Sun,
   Wifi,
   WifiOff,
+  KeyRound,
+  Copy,
 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { SearchBar } from "@/components/SearchBar";
 import { TreeView } from "@/components/TreeView";
 import { useNoteStore } from "@/store/useNoteStore";
 import { Separator } from "@/components/ui/separator";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -220,6 +223,151 @@ function SyncSettingsSection() {
   );
 }
 
+async function copyText(text: string, successMessage: string) {
+  if (!text) return;
+  try {
+    await invoke("copy_text_to_clipboard", { text });
+    showToast(successMessage, "success", 2000);
+  } catch (error) {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast(successMessage, "success", 2000);
+    } catch {
+      showToast(error instanceof Error ? error.message : "复制失败", "destructive");
+    }
+  }
+}
+
+function McpSettingsSection() {
+  const settings = useSyncStore((s) => s.settings);
+  const [token, setToken] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const hasSettings = Boolean(settings.address && settings.username && settings.password);
+  const endpoint =
+    token && settings.address ? `${SyncClient.httpBaseUrl(settings.address)}/mcp?token=${token}` : "";
+
+  useEffect(() => {
+    let active = true;
+    if (!hasSettings) {
+      setToken("");
+      setLoading(false);
+      return () => {
+        active = false;
+      };
+    }
+
+    setLoading(true);
+    const url = `${SyncClient.httpBaseUrl(settings.address)}/api/sync/mcp-token/${encodeURIComponent(
+      settings.username
+    )}`;
+    void fetch(url, {
+      headers: {
+        "x-orange-notes-user": settings.username,
+        "x-orange-notes-password": settings.password,
+      },
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await response.text());
+        return (await response.json()) as { token?: string | null };
+      })
+      .then((data) => {
+        if (active) setToken(data.token ?? "");
+      })
+      .catch((error) => {
+        showToast(error instanceof Error ? error.message : "加载 MCP Token 失败", "destructive");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [hasSettings, settings.address, settings.password, settings.username]);
+
+  const handleGenerate = async () => {
+    if (!hasSettings) {
+      showToast("请先保存同步服务器设置", "destructive");
+      return;
+    }
+    setGenerating(true);
+    try {
+      const url = `${SyncClient.httpBaseUrl(settings.address)}/api/sync/mcp-token/${encodeURIComponent(
+        settings.username
+      )}`;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "x-orange-notes-user": settings.username,
+          "x-orange-notes-password": settings.password,
+        },
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const data = (await response.json()) as { token: string };
+      setToken(data.token);
+      showToast("MCP Token 已生成", "success", 2000);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "生成 MCP Token 失败", "destructive");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="text-sm font-medium">MCP 访问</div>
+      <label className="block">
+        <span className="text-xs text-muted-foreground mb-1 block">专属 Token</span>
+        <Input
+          readOnly
+          value={token}
+          placeholder={loading ? "读取中..." : "尚未生成"}
+          className="font-mono text-xs"
+        />
+      </label>
+      {endpoint && (
+        <label className="block">
+          <span className="text-xs text-muted-foreground mb-1 block">连接地址</span>
+          <Input readOnly value={endpoint} className="font-mono text-xs" />
+        </label>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={generating || loading}
+          onClick={handleGenerate}
+        >
+          {generating ? (
+            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+          ) : (
+            <KeyRound className="mr-1 h-3 w-3" />
+          )}
+          {token ? "重新生成" : "生成 Token"}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!token}
+          onClick={() => void copyText(token, "Token 已复制")}
+        >
+          <Copy className="mr-1 h-3 w-3" />
+          复制 Token
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!endpoint}
+          onClick={() => void copyText(endpoint, "MCP 地址已复制")}
+        >
+          <Copy className="mr-1 h-3 w-3" />
+          复制地址
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function SettingsDialog({
   open,
   onOpenChange,
@@ -261,6 +409,9 @@ function SettingsDialog({
 
           {/* Sync Settings */}
           <SyncSettingsSection />
+          <Separator />
+
+          <McpSettingsSection />
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>

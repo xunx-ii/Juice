@@ -92,7 +92,10 @@ impl ClientMap {
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 enum ClientMessage {
-    Authenticate { username: String, password: String },
+    Authenticate {
+        username: String,
+        password: String,
+    },
     Push {
         state: NotebookState,
         base_version: i64,
@@ -241,10 +244,7 @@ async fn handle_socket(
                         }
                     };
 
-                    send_channel(
-                        &out_tx,
-                        ServerMessage::PushAck { version },
-                    );
+                    send_channel(&out_tx, ServerMessage::PushAck { version });
 
                     if let Err(error) = broadcast_current_state(&clients, &db, user).await {
                         send_channel(&out_tx, ServerMessage::Error { message: error });
@@ -310,11 +310,10 @@ async fn send_current_state(
     username: &str,
 ) -> Result<(), String> {
     let message = current_state_message(db, username).await?;
-    tx.send(message)
-        .map_err(|_| "同步连接已断开".to_string())
+    tx.send(message).map_err(|_| "同步连接已断开".to_string())
 }
 
-async fn broadcast_current_state(
+pub async fn broadcast_current_state(
     clients: &ClientMap,
     db: &Database,
     username: &str,
