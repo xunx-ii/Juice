@@ -16,7 +16,8 @@ use crate::{
     sync::{self, ClientMap},
 };
 
-const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const MCP_SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 const SYNC_USER_HEADER: &str = "x-orange-notes-user";
 const SYNC_PASSWORD_HEADER: &str = "x-orange-notes-password";
 
@@ -48,7 +49,8 @@ pub async fn mcp_info() -> impl IntoResponse {
         "name": "orange-notes-server",
         "transport": "streamable-http",
         "endpoint": "/mcp",
-        "protocolVersion": MCP_PROTOCOL_VERSION
+        "protocolVersion": MCP_PROTOCOL_VERSION,
+        "supportedProtocolVersions": MCP_SUPPORTED_PROTOCOL_VERSIONS
     }))
 }
 
@@ -120,14 +122,7 @@ async fn handle_rpc(
     let id = message.get("id").cloned()?;
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let result = match method {
-        "initialize" => Ok(json!({
-            "protocolVersion": MCP_PROTOCOL_VERSION,
-            "capabilities": { "tools": {} },
-            "serverInfo": {
-                "name": "orange-notes-server",
-                "version": env!("CARGO_PKG_VERSION")
-            }
-        })),
+        "initialize" => Ok(initialize_result(message)),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools() })),
         "tools/call" => call_tool(db, clients, user_id, message).await,
@@ -154,10 +149,14 @@ async fn call_tool(
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing tool name".to_string())?;
-    let arguments = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let arguments = match params.get("arguments") {
+        Some(Value::Object(_)) => params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        Some(Value::Null) | None => json!({}),
+        Some(_) => return Err("tool arguments must be an object".to_string()),
+    };
 
     let (result, changed) = match name {
         "list_folders" => (list_folders(db, user_id).await?, false),
@@ -182,6 +181,24 @@ async fn call_tool(
             }
         ]
     }))
+}
+
+fn initialize_result(message: &Value) -> Value {
+    let protocol_version = message
+        .get("params")
+        .and_then(|params| params.get("protocolVersion"))
+        .and_then(Value::as_str)
+        .filter(|version| MCP_SUPPORTED_PROTOCOL_VERSIONS.contains(version))
+        .unwrap_or(MCP_PROTOCOL_VERSION);
+
+    json!({
+        "protocolVersion": protocol_version,
+        "capabilities": { "tools": {} },
+        "serverInfo": {
+            "name": "orange-notes-server",
+            "version": env!("CARGO_PKG_VERSION")
+        }
+    })
 }
 
 fn tools() -> Value {

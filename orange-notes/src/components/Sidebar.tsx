@@ -19,7 +19,7 @@ import { SearchBar } from "@/components/SearchBar";
 import { TreeView } from "@/components/TreeView";
 import { useNoteStore } from "@/store/useNoteStore";
 import { Separator } from "@/components/ui/separator";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -243,13 +243,25 @@ function McpSettingsSection() {
   const [token, setToken] = useState("");
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
-  const hasSettings = Boolean(settings.address && settings.username && settings.password);
-  const endpoint =
-    token && settings.address ? `${SyncClient.httpBaseUrl(settings.address)}/mcp?token=${token}` : "";
+  const mcpUrls = useMemo(() => {
+    if (!settings.address || !settings.username) return null;
+    try {
+      const baseUrl = SyncClient.httpBaseUrl(settings.address);
+      return {
+        baseUrl,
+        tokenUrl: `${baseUrl}/api/sync/mcp-token/${encodeURIComponent(settings.username)}`,
+      };
+    } catch {
+      return null;
+    }
+  }, [settings.address, settings.username]);
+  const hasCredentials = Boolean(settings.address && settings.username && settings.password);
+  const hasSettings = hasCredentials && mcpUrls !== null;
+  const endpoint = token && mcpUrls ? `${mcpUrls.baseUrl}/mcp?token=${token}` : "";
 
   useEffect(() => {
     let active = true;
-    if (!hasSettings) {
+    if (!hasCredentials || !mcpUrls) {
       setToken("");
       setLoading(false);
       return () => {
@@ -258,10 +270,8 @@ function McpSettingsSection() {
     }
 
     setLoading(true);
-    const url = `${SyncClient.httpBaseUrl(settings.address)}/api/sync/mcp-token/${encodeURIComponent(
-      settings.username
-    )}`;
-    void fetch(url, {
+    setToken("");
+    void fetch(mcpUrls.tokenUrl, {
       headers: {
         "x-orange-notes-user": settings.username,
         "x-orange-notes-password": settings.password,
@@ -275,6 +285,7 @@ function McpSettingsSection() {
         if (active) setToken(data.token ?? "");
       })
       .catch((error) => {
+        if (active) setToken("");
         showToast(error instanceof Error ? error.message : "加载 MCP Token 失败", "destructive");
       })
       .finally(() => {
@@ -283,19 +294,16 @@ function McpSettingsSection() {
     return () => {
       active = false;
     };
-  }, [hasSettings, settings.address, settings.password, settings.username]);
+  }, [hasCredentials, mcpUrls, settings.password, settings.username]);
 
   const handleGenerate = async () => {
-    if (!hasSettings) {
-      showToast("请先保存同步服务器设置", "destructive");
+    if (!hasSettings || !mcpUrls) {
+      showToast("请先保存有效的同步服务器设置", "destructive");
       return;
     }
     setGenerating(true);
     try {
-      const url = `${SyncClient.httpBaseUrl(settings.address)}/api/sync/mcp-token/${encodeURIComponent(
-        settings.username
-      )}`;
-      const response = await fetch(url, {
+      const response = await fetch(mcpUrls.tokenUrl, {
         method: "POST",
         headers: {
           "x-orange-notes-user": settings.username,
