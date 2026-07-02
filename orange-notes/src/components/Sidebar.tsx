@@ -32,8 +32,10 @@ import { useSyncStore, type SyncSettings } from "@/sync/useSyncStore";
 import { SyncClient } from "@/sync/client";
 import { showToast } from "@/store/useToastStore";
 import {
+  createRemoteKeyCheckPayload,
   enableEndToEndEncryption,
   getEncryptionStatus,
+  getLocalEncryptionMetadata,
   lockEndToEndEncryption,
   unlockEndToEndEncryption,
   updateEndToEndEncryptionKey,
@@ -267,6 +269,45 @@ function syncAuthHeaders(settings: { username: string; password: string }): Head
   };
 }
 
+function hasCompleteSyncSettings(settings: SyncSettings) {
+  return Boolean(settings.address.trim() && settings.username.trim() && settings.password);
+}
+
+async function storeRemoteEncryptionCheck(settings: SyncSettings, passphrase: string) {
+  if (!hasCompleteSyncSettings(settings)) {
+    throw new Error("请先配置同步服务器");
+  }
+  const metadata = getLocalEncryptionMetadata();
+  if (!metadata?.enabled) {
+    throw new Error("端到端加密尚未开启");
+  }
+  const httpBase = SyncClient.httpBaseUrl(settings.address.trim());
+  const response = await fetch(
+    `${httpBase}/api/sync/e2ee-check/${encodeURIComponent(settings.username.trim())}`,
+    {
+      method: "POST",
+      headers: {
+        ...syncAuthHeaders({ username: settings.username.trim(), password: settings.password }),
+        "Content-Type": "application/json",
+        "x-orange-notes-e2ee-key": encodeURIComponent(passphrase),
+      },
+      body: JSON.stringify({
+        encryption: metadata,
+        check: await createRemoteKeyCheckPayload(),
+      }),
+    }
+  );
+  if (!response.ok) throw new Error(await response.text());
+}
+
+async function pushEncryptionStateOrThrow() {
+  const store = useSyncStore.getState();
+  if (store.syncing) throw new Error("同步进行中，请稍后再试");
+  await store.pushNow(true);
+  const message = useSyncStore.getState().lastError;
+  if (message) throw new Error(message);
+}
+
 function McpSettingsSection({ settings }: { settings: SyncSettings }) {
   const { address, username, password } = settings;
   const [token, setToken] = useState("");
@@ -404,7 +445,7 @@ function McpSettingsSection({ settings }: { settings: SyncSettings }) {
 }
 
 function EncryptionSettingsSection() {
-  const schedulePush = useSyncStore((s) => s.schedulePush);
+  const syncSettings = useSyncStore((s) => s.settings);
   const [status, setStatus] = useState<EncryptionStatus>(() => getEncryptionStatus());
   const [passphrase, setPassphrase] = useState("");
   const [currentPassphrase, setCurrentPassphrase] = useState("");
@@ -438,9 +479,11 @@ function EncryptionSettingsSection() {
     void runEncryptionAction(
       "enable",
       async () => {
+        if (!hasCompleteSyncSettings(syncSettings)) throw new Error("请先配置同步服务器");
         await enableEndToEndEncryption(passphrase);
+        await pushEncryptionStateOrThrow();
+        await storeRemoteEncryptionCheck(syncSettings, passphrase);
         setPassphrase("");
-        schedulePush();
       },
       "端到端加密已开启"
     );
@@ -469,10 +512,12 @@ function EncryptionSettingsSection() {
     void runEncryptionAction(
       "update",
       async () => {
+        if (!hasCompleteSyncSettings(syncSettings)) throw new Error("请先配置同步服务器");
         await updateEndToEndEncryptionKey(currentPassphrase, nextPassphrase);
+        await pushEncryptionStateOrThrow();
+        await storeRemoteEncryptionCheck(syncSettings, nextPassphrase);
         setCurrentPassphrase("");
         setNextPassphrase("");
-        schedulePush();
       },
       "端到端密钥已更新"
     );

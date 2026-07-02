@@ -57,6 +57,8 @@ pub struct EncryptionMeta {
     pub iterations: i64,
     pub key_check_iv: String,
     pub key_check: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_check: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -284,7 +286,7 @@ impl Database {
 
             let encryption = conn
                 .query_row(
-                    "SELECT enabled, version, algorithm, kdf, salt, iterations, key_check_iv, key_check
+                    "SELECT enabled, version, algorithm, kdf, salt, iterations, key_check_iv, key_check, mcp_check
                      FROM encryption_meta
                      WHERE user_id = ?1",
                     params![user_id.clone()],
@@ -298,6 +300,7 @@ impl Database {
                             iterations: row.get(5)?,
                             key_check_iv: row.get(6)?,
                             key_check: row.get(7)?,
+                            mcp_check: row.get(8)?,
                         })
                     },
                 )
@@ -363,6 +366,103 @@ impl Database {
                 .optional()?
                 .unwrap_or(0);
             Ok(enabled != 0)
+        })
+        .await
+    }
+
+    pub async fn get_encryption_meta(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<EncryptionMeta>, rusqlite::Error> {
+        let user_id = user_id.to_string();
+        self.conn(move |conn| {
+            conn.query_row(
+                "SELECT enabled, version, algorithm, kdf, salt, iterations, key_check_iv, key_check, mcp_check
+                 FROM encryption_meta
+                 WHERE user_id = ?1",
+                params![user_id],
+                |row| {
+                    Ok(EncryptionMeta {
+                        enabled: row.get::<_, i64>(0)? != 0,
+                        version: row.get(1)?,
+                        algorithm: row.get(2)?,
+                        kdf: row.get(3)?,
+                        salt: row.get(4)?,
+                        iterations: row.get(5)?,
+                        key_check_iv: row.get(6)?,
+                        key_check: row.get(7)?,
+                        mcp_check: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+        })
+        .await
+    }
+
+    pub async fn update_encryption_mcp_check(
+        &self,
+        user_id: &str,
+        mcp_check: String,
+    ) -> Result<bool, rusqlite::Error> {
+        let user_id = user_id.to_string();
+        self.conn(move |conn| {
+            let changed = conn.execute(
+                "UPDATE encryption_meta
+                 SET mcp_check = ?2
+                 WHERE user_id = ?1 AND enabled = 1",
+                params![user_id, mcp_check],
+            )?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
+    pub async fn list_notes_page(
+        &self,
+        user_id: &str,
+        folder_id: Option<String>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Note>, rusqlite::Error> {
+        let user_id = user_id.to_string();
+        self.conn(move |conn| {
+            let map_row = |row: &rusqlite::Row<'_>| {
+                Ok(Note {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    content: row.get(2)?,
+                    folder: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                    sort_order: row.get(6)?,
+                    pinned: row.get::<_, i64>(7)? != 0,
+                    favorite: row.get::<_, i64>(8)? != 0,
+                    ai_permission: row.get(9)?,
+                })
+            };
+
+            if let Some(folder_id) = folder_id {
+                let mut stmt = conn.prepare(
+                    "SELECT id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite, ai_permission
+                     FROM notes
+                     WHERE user_id = ?1 AND folder = ?2
+                     ORDER BY folder ASC, sort_order ASC
+                     LIMIT ?3 OFFSET ?4",
+                )?;
+                let rows = stmt.query_map(params![user_id, folder_id, limit, offset], map_row)?;
+                return rows.collect::<Result<Vec<_>, _>>();
+            }
+
+            let mut stmt = conn.prepare(
+                "SELECT id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite, ai_permission
+                 FROM notes
+                 WHERE user_id = ?1
+                 ORDER BY folder ASC, sort_order ASC
+                 LIMIT ?2 OFFSET ?3",
+            )?;
+            let rows = stmt.query_map(params![user_id, limit, offset], map_row)?;
+            rows.collect::<Result<Vec<_>, _>>()
         })
         .await
     }
@@ -626,7 +726,18 @@ impl Database {
                        salt = excluded.salt,
                        iterations = excluded.iterations,
                        key_check_iv = excluded.key_check_iv,
-                       key_check = excluded.key_check",
+                       key_check = excluded.key_check,
+                       mcp_check = CASE
+                         WHEN encryption_meta.version = excluded.version
+                           AND encryption_meta.algorithm = excluded.algorithm
+                           AND encryption_meta.kdf = excluded.kdf
+                           AND encryption_meta.salt = excluded.salt
+                           AND encryption_meta.iterations = excluded.iterations
+                           AND encryption_meta.key_check_iv = excluded.key_check_iv
+                           AND encryption_meta.key_check = excluded.key_check
+                         THEN encryption_meta.mcp_check
+                         ELSE NULL
+                       END",
                     params![
                         user_id.clone(),
                         encryption.enabled as i64,
@@ -858,6 +969,7 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           iterations INTEGER NOT NULL,
           key_check_iv TEXT NOT NULL,
           key_check TEXT NOT NULL,
+          mcp_check TEXT,
           FOREIGN KEY(user_id) REFERENCES users(username) ON DELETE CASCADE
         );
 
@@ -878,6 +990,7 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     )?;
     ensure_text_column(conn, "folders", "ai_permission", "'write'")?;
     ensure_text_column(conn, "notes", "ai_permission", "'write'")?;
+    ensure_nullable_text_column(conn, "encryption_meta", "mcp_check")?;
     Ok(())
 }
 
@@ -900,6 +1013,23 @@ fn ensure_text_column(
             ),
             [],
         )?;
+    }
+    Ok(())
+}
+
+fn ensure_nullable_text_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<(), rusqlite::Error> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .any(|name| name == column);
+    if !exists {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"), [])?;
     }
     Ok(())
 }

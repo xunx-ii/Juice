@@ -3,6 +3,7 @@ import type { RemoteEncryptionMeta, RemoteNotebookState } from "@/sync/protocol"
 const STORAGE_KEY = "orange-notes-e2ee-settings";
 const PAYLOAD_PREFIX = "orange-notes-e2ee:v1:";
 const KEY_CHECK_TEXT = "orange-notes-key-check";
+const MCP_KEY_CHECK_TEXT = "hello";
 const DEFAULT_ITERATIONS = 310_000;
 
 type EncryptionSettings = RemoteEncryptionMeta;
@@ -156,6 +157,13 @@ export function getLocalEncryptionMetadata(): RemoteEncryptionMeta | null {
     key_check_iv: settings.key_check_iv,
     key_check: settings.key_check,
   };
+}
+
+export async function createRemoteKeyCheckPayload(): Promise<string> {
+  const metadata = getLocalEncryptionMetadata();
+  if (!metadata?.enabled) throw new Error("端到端加密尚未开启");
+  const key = await ensureKeyFor(metadata);
+  return encryptText(MCP_KEY_CHECK_TEXT, key);
 }
 
 export function cacheRemoteEncryptionMetadata(metadata?: RemoteEncryptionMeta | null) {
