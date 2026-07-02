@@ -138,6 +138,13 @@ fn extract_image_file_names(content: &str) -> HashSet<String> {
     names
 }
 
+fn normalize_ai_permission(permission: &str) -> &str {
+    match permission {
+        "read" | "write" | "none" => permission,
+        _ => "write",
+    }
+}
+
 fn cleanup_unreferenced_images(
     conn: &Connection,
     img_dir: &PathBuf,
@@ -343,7 +350,7 @@ fn apply_remote_notebook(
                 f.name,
                 f.sort_order,
                 f.parent_id,
-                f.ai_permission.as_deref().unwrap_or("write")
+                normalize_ai_permission(f.ai_permission.as_deref().unwrap_or("write"))
             ],
         )?;
     }
@@ -362,7 +369,7 @@ fn apply_remote_notebook(
                 n.sort_order,
                 n.pinned as i64,
                 n.favorite as i64,
-                n.ai_permission.as_deref().unwrap_or("write")
+                normalize_ai_permission(n.ai_permission.as_deref().unwrap_or("write"))
             ],
         )?;
     }
@@ -637,7 +644,12 @@ fn update_note(
             patch.sort_order.unwrap_or(existing.sort_order),
             patch.pinned.unwrap_or(existing.pinned) as i64,
             patch.favorite.unwrap_or(existing.favorite) as i64,
-            patch.ai_permission.unwrap_or(existing.ai_permission),
+            normalize_ai_permission(
+                patch
+                    .ai_permission
+                    .as_deref()
+                    .unwrap_or(existing.ai_permission.as_str()),
+            ),
             existing.id
         ],
     )?;
@@ -766,6 +778,7 @@ fn update_folder_permission(
     ai_permission: String,
 ) -> Result<(), AppError> {
     let conn = state.db.lock().expect("database mutex poisoned");
+    let ai_permission = normalize_ai_permission(&ai_permission);
     conn.execute(
         "UPDATE folders SET ai_permission = $1 WHERE id = $2",
         params![ai_permission, id],
