@@ -148,7 +148,7 @@ interface ContextMenuState {
 }
 
 const AI_PERMISSION_OPTIONS: { value: AiPermission; label: string }[] = [
-  { value: "write", label: "可写" },
+  { value: "write", label: "可读写" },
   { value: "read", label: "可读" },
   { value: "none", label: "不可读写" },
 ];
@@ -174,6 +174,8 @@ function ContextMenuFlyout({
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const [permissionOpen, setPermissionOpen] = useState(false);
+  const currentPermissionLabel =
+    AI_PERMISSION_OPTIONS.find((option) => option.value === currentPermission)?.label ?? "不可读写";
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -219,17 +221,15 @@ function ContextMenuFlyout({
     state.type === "empty" ? null : (
       <>
         <div className="h-px bg-border/60 my-1" />
-        <div
-          className="relative"
-          onMouseEnter={() => setPermissionOpen(true)}
-          onMouseLeave={() => setPermissionOpen(false)}
-        >
+        <div className="relative">
           <button
             className="flex items-center gap-2.5 w-full px-2.5 py-[7px] text-xs rounded-md hover:bg-accent/80 active:scale-[0.98] transition-all"
             onClick={() => setPermissionOpen((open) => !open)}
+            aria-expanded={permissionOpen}
+            aria-haspopup="menu"
           >
             <Check className="h-3.5 w-3.5 opacity-0" />
-            <span className="font-medium flex-1 text-left">AI读写权限</span>
+            <span className="font-medium flex-1 text-left">AI读写权限:{currentPermissionLabel}</span>
             <ChevronRight
               className={cn(
                 "h-3.5 w-3.5 transition-transform",
