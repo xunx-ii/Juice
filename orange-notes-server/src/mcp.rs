@@ -289,8 +289,11 @@ fn tools() -> Value {
 }
 
 async fn list_folders(db: &Database, user_id: &str) -> Result<Value, String> {
-    let state = get_state(db, user_id).await?;
-    Ok(json!({ "folders": state.folders }))
+    let folders = db
+        .list_folders(user_id)
+        .await
+        .map_err(|error| format!("database error: {error}"))?;
+    Ok(json!({ "folders": folders }))
 }
 
 async fn list_notes(db: &Database, user_id: &str, arguments: &Value) -> Result<Value, String> {

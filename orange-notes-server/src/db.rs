@@ -292,6 +292,29 @@ impl Database {
         }).await
     }
 
+    pub async fn list_folders(&self, user_id: &str) -> Result<Vec<Folder>, rusqlite::Error> {
+        let user_id = user_id.to_string();
+        self.conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, sort_order, parent_id, updated_at
+                 FROM folders
+                 WHERE user_id = ?1
+                 ORDER BY sort_order ASC",
+            )?;
+            let rows = stmt.query_map(params![user_id], |row| {
+                Ok(Folder {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    sort_order: row.get(2)?,
+                    parent_id: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+        .await
+    }
+
     pub async fn list_note_summaries(
         &self,
         user_id: &str,
