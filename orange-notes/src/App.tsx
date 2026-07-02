@@ -29,7 +29,7 @@ function App() {
     void initialize().then(() => {
       const { settings } = useSyncStore.getState();
       if (settings.address && settings.username && settings.password) {
-        void connectRealtime().catch(() => {});
+        void connectRealtime(true).catch(() => {});
       }
     });
   }, [connectRealtime, initialize]);

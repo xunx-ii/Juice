@@ -106,6 +106,7 @@
 
 <script>
 // Token management
+let refreshTimer = null;
 function getToken() { return localStorage.getItem('admin_token') || ''; }
 function setToken(t) { localStorage.setItem('admin_token', t); }
 function el(id) { return document.getElementById(id); }
@@ -154,6 +155,7 @@ function submitToken() {
   el('token-modal').style.display = 'none';
   el('token-error').textContent = '';
   loadAll();
+  startAutoRefresh();
 }
 
 function fmtUptime(sec) {
@@ -313,12 +315,17 @@ async function loadAll() {
   await Promise.all([loadStats(), loadClients(), loadUsers()]);
 }
 
+function startAutoRefresh() {
+  if (refreshTimer !== null) return;
+  refreshTimer = setInterval(loadAll, 15000);
+}
+
 // If no saved token, show modal on first load.
 if (!getToken()) {
   el('token-modal').style.display = 'flex';
 } else {
   loadAll();
-  setInterval(loadAll, 15000);
+  startAutoRefresh();
 }
 el('refresh-button').addEventListener('click', loadAll);
 el('register-toggle-button').addEventListener('click', toggleRegister);

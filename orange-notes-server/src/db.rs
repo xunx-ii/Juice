@@ -223,7 +223,7 @@ impl Database {
         self.conn(move |conn| {
             let tx = conn.transaction()?;
             tx.execute(
-                "INSERT OR IGNORE INTO users (username, password_hash) VALUES (?1, ?2)",
+                "INSERT INTO users (username, password_hash) VALUES (?1, ?2)",
                 params![username, password_hash],
             )?;
             tx.execute(

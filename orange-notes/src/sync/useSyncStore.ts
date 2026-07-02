@@ -160,9 +160,15 @@ async function mergeRejectedState(message: RemoteStateMessage) {
 }
 
 async function applyIncomingState(message: RemoteStateMessage) {
-  cacheRemoteEncryptionMetadata(message.state.encryption);
   const noteStore = useNoteStore.getState();
   const localVersion = noteStore.syncVersion;
+  const localEncryption = getLocalEncryptionMetadata();
+  if (
+    message.state.encryption?.enabled &&
+    (message.state.version > localVersion || !localEncryption?.enabled)
+  ) {
+    cacheRemoteEncryptionMetadata(message.state.encryption);
+  }
 
   const store = useSyncStore.getState();
   if (message.state.version === 0 && localVersion === 0 && noteStore.hasContent()) {
