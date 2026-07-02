@@ -54,7 +54,9 @@ pub async fn mcp_info() -> impl IntoResponse {
         "transport": "streamable-http",
         "endpoint": "/mcp",
         "protocolVersion": MCP_PROTOCOL_VERSION,
-        "supportedProtocolVersions": MCP_SUPPORTED_PROTOCOL_VERSIONS
+        "supportedProtocolVersions": MCP_SUPPORTED_PROTOCOL_VERSIONS,
+        "capabilities": { "tools": {} },
+        "tools": tools()
     }))
 }
 
