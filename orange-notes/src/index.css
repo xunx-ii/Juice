@@ -66,7 +66,7 @@
     --prose-quotes: oklch(0.4 0.01 280);
     --prose-quote-borders: oklch(0.85 0.005 280);
     --prose-code: oklch(0.2 0.02 280);
-    --prose-pre-code: oklch(0.95 0.005 280);
+    --prose-pre-code: oklch(0.18 0.015 280);
     --prose-pre-bg: oklch(0.98 0.003 280);
     --prose-th-borders: oklch(0.88 0.003 280);
     --prose-td-borders: oklch(0.92 0.003 280);
@@ -315,9 +315,13 @@
   .note-prose pre code {
     background: transparent;
     padding: 0;
-    color: var(--prose-pre-code);
+    color: var(--prose-pre-code) !important;
     font-size: inherit;
     border-radius: 0;
+  }
+
+  .note-prose pre code * {
+    color: inherit !important;
   }
 
   /* ─── Tables ─── */
