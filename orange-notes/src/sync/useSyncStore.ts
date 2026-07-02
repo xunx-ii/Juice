@@ -8,6 +8,12 @@ import {
   notifyNoteImageAvailable,
   notifyNoteImagesDeleted,
 } from "@/lib/noteImageEvents";
+import {
+  cacheRemoteEncryptionMetadata,
+  decryptAttachmentBytes,
+  encryptAttachmentBytes,
+  getLocalEncryptionMetadata,
+} from "@/sync/encryption";
 
 const IMAGE_TOKEN_RE = /!\[\[([^\]\r\n]+)\]\]/g;
 const STORAGE_KEY = "orange-notes-sync-settings";
@@ -94,6 +100,7 @@ function referencedImagesFromRemoteState(message: RemoteStateMessage): Set<strin
 }
 
 function filterReferencedAttachments(message: RemoteStateMessage): RemoteAttachmentMeta[] {
+  if (message.state.encryption?.enabled) return message.attachments;
   const referenced = referencedImagesFromRemoteState(message);
   return message.attachments.filter((attachment) => referenced.has(attachment.file_name));
 }
@@ -153,6 +160,7 @@ async function mergeRejectedState(message: RemoteStateMessage) {
 }
 
 async function applyIncomingState(message: RemoteStateMessage) {
+  cacheRemoteEncryptionMetadata(message.state.encryption);
   const noteStore = useNoteStore.getState();
   const localVersion = noteStore.syncVersion;
 
@@ -271,7 +279,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
       await get().syncImages();
       for (let attempt = 0; attempt < MAX_PUSH_ATTEMPTS; attempt += 1) {
         const noteStore = useNoteStore.getState();
-        const payload = noteStore.getSyncPayload();
+        const payload = await noteStore.getSyncPayload();
         const result = await syncClient.push(payload, noteStore.syncVersion);
         if (result.accepted) {
           await useNoteStore.getState().markSynced(result.version);
@@ -332,13 +340,15 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
       try {
         const bytes = await invoke<number[]>("read_note_image_bytes", { fileName });
         if (!bytes.length) continue;
+        const encryptedBytes = await encryptAttachmentBytes(new Uint8Array(bytes));
+        const body = encryptedBytes.slice().buffer;
 
         await fetch(
           `${httpBase}/api/sync/files/${encodeURIComponent(settings.username)}/${encodeURIComponent(fileName)}`,
           {
             method: "POST",
             headers: syncAuthHeaders(settings),
-            body: new Uint8Array(bytes),
+            body,
           }
         );
       } catch {
@@ -348,6 +358,7 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
   },
 
   cleanupLocalImages: async () => {
+    if (getLocalEncryptionMetadata()?.enabled) return;
     try {
       const deletedImages = await invoke<string[]>("cleanup_unreferenced_note_images");
       notifyNoteImagesDeleted(deletedImages);
@@ -369,7 +380,10 @@ export const useSyncStore = create<SyncStore>((set, get) => ({
         throw new Error(`下载图片失败: ${response.status} ${response.statusText}`);
       }
 
-      const bytes = Array.from(new Uint8Array(await response.arrayBuffer()));
+      const encryptedBytes = new Uint8Array(await response.arrayBuffer());
+      const bytes = Array.from(
+        await decryptAttachmentBytes(encryptedBytes, getLocalEncryptionMetadata())
+      );
       await invoke("save_synced_image", { fileName, mime, bytes });
       notifyNoteImageAvailable(fileName);
       set({ lastError: null });

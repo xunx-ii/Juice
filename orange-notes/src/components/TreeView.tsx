@@ -6,6 +6,7 @@ import {
   FolderIcon,
   Trash2,
   Pencil,
+  Check,
   FilePlus,
   FolderPlus,
   FolderOpenIcon,
@@ -22,6 +23,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useNoteStore } from "@/store/useNoteStore";
 import { cn } from "@/lib/utils";
+import type { AiPermission } from "@/types/note";
 
 /* ───────────────────────────────────────────────────────────────────
  * VSCode-style drop indicator (a thin horizontal line with end-caps
@@ -144,20 +146,30 @@ interface ContextMenuState {
   id: string;
 }
 
+const AI_PERMISSION_OPTIONS: { value: AiPermission; label: string }[] = [
+  { value: "write", label: "可写" },
+  { value: "read", label: "可读" },
+  { value: "none", label: "不可读写" },
+];
+
 function ContextMenuFlyout({
   state,
   onClose,
   onNewNoteInFolder,
   onNewFolder,
   onRename,
+  onSetPermission,
   onDelete,
+  currentPermission,
 }: {
   state: ContextMenuState;
   onClose: () => void;
   onNewNoteInFolder: (id: string) => void;
   onNewFolder: (parentId: string | null) => void;
   onRename: (id: string) => void;
+  onSetPermission: (id: string, permission: AiPermission) => void;
   onDelete: (id: string) => void;
+  currentPermission?: AiPermission;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -180,7 +192,7 @@ function ContextMenuFlyout({
   const vh = window.innerHeight;
   const style: React.CSSProperties = useMemo(() => {
     const menuWidth = 188;
-    const menuHeight = state.type === "folder" ? 180 : state.type === "empty" ? 80 : 100;
+    const menuHeight = state.type === "folder" ? 285 : state.type === "empty" ? 80 : 205;
     return {
       position: "fixed",
       left: Math.max(8, Math.min(state.x, vw - menuWidth - 8)),
@@ -193,6 +205,28 @@ function ContextMenuFlyout({
     fn();
     onClose();
   };
+
+  const permissionMenu =
+    state.type === "empty" ? null : (
+      <>
+        <div className="h-px bg-border/60 my-1" />
+        {AI_PERMISSION_OPTIONS.map((option) => (
+          <button
+            key={option.value}
+            className="flex items-center gap-2.5 w-full px-2.5 py-[7px] text-xs rounded-md hover:bg-accent/80 active:scale-[0.98] transition-all"
+            onClick={() => act(() => onSetPermission(state.id, option.value))}
+          >
+            <Check
+              className={cn(
+                "h-3.5 w-3.5",
+                currentPermission === option.value ? "opacity-100" : "opacity-0"
+              )}
+            />
+            <span className="font-medium">{option.label}</span>
+          </button>
+        ))}
+      </>
+    );
 
   return (
     <div
@@ -224,6 +258,8 @@ function ContextMenuFlyout({
             <Pencil className="h-3.5 w-3.5" />
             <span className="font-medium">重命名</span>
           </button>
+          {permissionMenu}
+          <div className="h-px bg-border/60 my-1" />
           <button
             className="flex items-center gap-2.5 w-full px-2.5 py-[7px] text-xs rounded-md hover:bg-destructive/10 active:scale-[0.98] transition-all text-destructive focus:text-destructive"
             onClick={() => act(() => onDelete(state.id))}
@@ -251,6 +287,7 @@ function ContextMenuFlyout({
             <Pencil className="h-3.5 w-3.5" />
             <span className="font-medium">重命名</span>
           </button>
+          {permissionMenu}
           <div className="h-px bg-border/60 my-1" />
           <button
             className="flex items-center gap-2.5 w-full px-2.5 py-[7px] text-xs rounded-md hover:bg-destructive/10 active:scale-[0.98] transition-all text-destructive focus:text-destructive"
@@ -279,6 +316,7 @@ interface Row {
   isExpanded?: boolean;
   isActive?: boolean;
   isPinned?: boolean;
+  aiPermission?: AiPermission;
 }
 
 interface DragState {
@@ -305,6 +343,7 @@ export function TreeView() {
   const renameFolder = useNoteStore((s) => s.renameFolder);
   const deleteFolder = useNoteStore((s) => s.deleteFolder);
   const moveFolderTo = useNoteStore((s) => s.moveFolderTo);
+  const updateFolderPermission = useNoteStore((s) => s.updateFolderPermission);
   const toggleFolder = useNoteStore((s) => s.toggleFolder);
 
   const [renameNoteId, setRenameNoteId] = useState<string | null>(null);
@@ -394,6 +433,7 @@ export function TreeView() {
             parentId,
             label: folder.name,
             isExpanded: true,
+            aiPermission: folder.aiPermission,
           });
           walk(folder.id, depth + 1);
           for (const note of notesByFolder.get(folder.id) ?? []) {
@@ -407,6 +447,7 @@ export function TreeView() {
               label: note.title || "未命名笔记",
               isActive: note.id === activeNoteId,
               isPinned: note.pinned,
+              aiPermission: note.aiPermission,
             });
           }
           continue;
@@ -419,6 +460,7 @@ export function TreeView() {
           parentId,
           label: folder.name,
           isExpanded,
+          aiPermission: folder.aiPermission,
         });
         if (isExpanded) {
           walk(folder.id, depth + 1);
@@ -432,6 +474,7 @@ export function TreeView() {
               label: note.title || "未命名笔记",
               isActive: note.id === activeNoteId,
               isPinned: note.pinned,
+              aiPermission: note.aiPermission,
             });
           }
         }
@@ -772,11 +815,23 @@ export function TreeView() {
             if (ctxMenu.type === "note") setRenameNoteId(id);
             else setRenameFolderId(id);
           }}
+          onSetPermission={(id, permission) => {
+            setCtxMenu(null);
+            if (ctxMenu.type === "folder") void updateFolderPermission(id, permission);
+            if (ctxMenu.type === "note") void updateNote(id, { aiPermission: permission });
+          }}
           onDelete={(id) => {
             setCtxMenu(null);
             if (ctxMenu.type === "note") setDeleteNoteId(id);
             else setDeleteFolderId(id);
           }}
+          currentPermission={
+            ctxMenu.type === "folder"
+              ? folders.find((folder) => folder.id === ctxMenu.id)?.aiPermission
+              : ctxMenu.type === "note"
+                ? notes.find((note) => note.id === ctxMenu.id)?.aiPermission
+                : undefined
+          }
         />
       )}
 

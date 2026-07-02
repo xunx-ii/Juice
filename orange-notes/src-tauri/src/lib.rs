@@ -12,6 +12,8 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use thiserror::Error;
 use uuid::Uuid;
 
+const ENCRYPTED_TEXT_PREFIX: &str = "orange-notes-e2ee:v1:";
+
 #[derive(Debug, Error)]
 enum AppError {
     #[error("database error: {0}")]
@@ -42,6 +44,7 @@ struct Folder {
     name: String,
     sort_order: i64,
     parent_id: Option<String>,
+    ai_permission: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -56,6 +59,7 @@ struct Note {
     sort_order: i64,
     pinned: bool,
     favorite: bool,
+    ai_permission: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,6 +83,7 @@ struct NotePatch {
     sort_order: Option<i64>,
     pinned: Option<bool>,
     favorite: Option<bool>,
+    ai_permission: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -147,6 +152,12 @@ fn cleanup_unreferenced_images(
     let contents = stmt
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
+    if contents
+        .iter()
+        .any(|content| content.starts_with(ENCRYPTED_TEXT_PREFIX))
+    {
+        return Ok(Vec::new());
+    }
     for content in contents {
         referenced.extend(extract_image_file_names(&content));
     }
@@ -212,7 +223,8 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
           sort_order INTEGER NOT NULL,
-          parent_id TEXT
+          parent_id TEXT,
+          ai_permission TEXT NOT NULL DEFAULT 'write'
         );
 
         CREATE TABLE IF NOT EXISTS notes (
@@ -225,6 +237,7 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
           sort_order INTEGER NOT NULL,
           pinned INTEGER NOT NULL DEFAULT 0,
           favorite INTEGER NOT NULL DEFAULT 0,
+          ai_permission TEXT NOT NULL DEFAULT 'write',
           FOREIGN KEY(folder) REFERENCES folders(id) ON DELETE CASCADE
         );
 
@@ -241,6 +254,31 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
         );
         ",
     )?;
+    ensure_text_column(conn, "folders", "ai_permission", "'write'")?;
+    ensure_text_column(conn, "notes", "ai_permission", "'write'")?;
+    Ok(())
+}
+
+fn ensure_text_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    default_value: &str,
+) -> Result<(), AppError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .any(|name| name == column);
+    if !exists {
+        conn.execute(
+            &format!(
+                "ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT {default_value}"
+            ),
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -253,7 +291,15 @@ fn apply_remote_notebook(
     clear_changes: bool,
 ) -> Result<Vec<String>, AppError> {
     let mut conn = state.db.lock().expect("database mutex poisoned");
-    let previous_images = {
+    let encrypted_remote = remote_notes.iter().any(|note| {
+        note.title.starts_with(ENCRYPTED_TEXT_PREFIX)
+            || note.content.starts_with(ENCRYPTED_TEXT_PREFIX)
+    }) || remote_folders
+        .iter()
+        .any(|folder| folder.name.starts_with(ENCRYPTED_TEXT_PREFIX));
+    let previous_images = if encrypted_remote {
+        HashSet::new()
+    } else {
         let mut stmt = conn.prepare("SELECT content FROM notes")?;
         let contents = stmt
             .query_map([], |row| row.get::<_, String>(0))?
@@ -265,17 +311,21 @@ fn apply_remote_notebook(
         images
     };
     let mut remote_images = HashSet::new();
-    for note in &remote_notes {
-        remote_images.extend(extract_image_file_names(&note.content));
+    if !encrypted_remote {
+        for note in &remote_notes {
+            remote_images.extend(extract_image_file_names(&note.content));
+        }
     }
     let removed_images = previous_images
         .difference(&remote_images)
         .cloned()
         .collect::<HashSet<_>>();
     let mut cleanup_candidates = removed_images;
-    for file_name in local_image_file_names(&state.img_dir)? {
-        if !remote_images.contains(&file_name) {
-            cleanup_candidates.insert(file_name);
+    if !encrypted_remote {
+        for file_name in local_image_file_names(&state.img_dir)? {
+            if !remote_images.contains(&file_name) {
+                cleanup_candidates.insert(file_name);
+            }
         }
     }
 
@@ -286,15 +336,22 @@ fn apply_remote_notebook(
 
     for f in &remote_folders {
         tx.execute(
-            "INSERT INTO folders (id, name, sort_order, parent_id) VALUES ($1, $2, $3, $4)",
-            params![f.id, f.name, f.sort_order, f.parent_id],
+            "INSERT INTO folders (id, name, sort_order, parent_id, ai_permission)
+             VALUES ($1, $2, $3, $4, $5)",
+            params![
+                f.id,
+                f.name,
+                f.sort_order,
+                f.parent_id,
+                f.ai_permission.as_deref().unwrap_or("write")
+            ],
         )?;
     }
 
     for n in &remote_notes {
         tx.execute(
-            "INSERT INTO notes (id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            "INSERT INTO notes (id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite, ai_permission)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             params![
                 n.id,
                 n.title,
@@ -304,7 +361,8 @@ fn apply_remote_notebook(
                 n.updated_at,
                 n.sort_order,
                 n.pinned as i64,
-                n.favorite as i64
+                n.favorite as i64,
+                n.ai_permission.as_deref().unwrap_or("write")
             ],
         )?;
     }
@@ -384,6 +442,7 @@ struct RemoteFolderArg {
     name: String,
     sort_order: i64,
     parent_id: Option<String>,
+    ai_permission: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,11 +456,15 @@ struct RemoteNoteArg {
     sort_order: i64,
     pinned: bool,
     favorite: bool,
+    ai_permission: Option<String>,
 }
 
 fn read_all(conn: &Connection) -> Result<NotebookData, AppError> {
-    let mut folders_stmt = conn
-        .prepare("SELECT id, name, sort_order, parent_id FROM folders ORDER BY sort_order ASC")?;
+    let mut folders_stmt = conn.prepare(
+        "SELECT id, name, sort_order, parent_id, ai_permission
+         FROM folders
+         ORDER BY sort_order ASC",
+    )?;
     let folders = folders_stmt
         .query_map([], |row| {
             Ok(Folder {
@@ -409,12 +472,13 @@ fn read_all(conn: &Connection) -> Result<NotebookData, AppError> {
                 name: row.get(1)?,
                 sort_order: row.get(2)?,
                 parent_id: row.get(3)?,
+                ai_permission: row.get(4)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut notes_stmt = conn.prepare(
-        "SELECT id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite
+        "SELECT id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite, ai_permission
          FROM notes
          ORDER BY folder ASC, sort_order ASC, updated_at DESC",
     )?;
@@ -430,6 +494,7 @@ fn read_all(conn: &Connection) -> Result<NotebookData, AppError> {
                 sort_order: row.get(6)?,
                 pinned: row.get::<_, i64>(7)? != 0,
                 favorite: row.get::<_, i64>(8)? != 0,
+                ai_permission: row.get(9)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -490,10 +555,11 @@ fn create_note(state: tauri::State<'_, AppState>, folder_id: String) -> Result<N
         sort_order: max_order + 1,
         pinned: false,
         favorite: false,
+        ai_permission: "write".to_string(),
     };
     conn.execute(
-        "INSERT INTO notes (id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "INSERT INTO notes (id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite, ai_permission)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         params![
             note.id,
             note.title,
@@ -503,7 +569,8 @@ fn create_note(state: tauri::State<'_, AppState>, folder_id: String) -> Result<N
             note.updated_at,
             note.sort_order,
             note.pinned as i64,
-            note.favorite as i64
+            note.favorite as i64,
+            note.ai_permission
         ],
     )?;
     Ok(note)
@@ -532,7 +599,7 @@ fn update_note(
 ) -> Result<Vec<String>, AppError> {
     let conn = state.db.lock().expect("database mutex poisoned");
     let existing: Note = conn.query_row(
-        "SELECT id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite FROM notes WHERE id = $1",
+        "SELECT id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite, ai_permission FROM notes WHERE id = $1",
         params![id],
         |row| {
             Ok(Note {
@@ -545,6 +612,7 @@ fn update_note(
                 sort_order: row.get(6)?,
                 pinned: row.get::<_, i64>(7)? != 0,
                 favorite: row.get::<_, i64>(8)? != 0,
+                ai_permission: row.get(9)?,
             })
         },
     )?;
@@ -559,8 +627,8 @@ fn update_note(
 
     conn.execute(
         "UPDATE notes
-         SET title = $1, content = $2, folder = $3, updated_at = $4, sort_order = $5, pinned = $6, favorite = $7
-         WHERE id = $8",
+         SET title = $1, content = $2, folder = $3, updated_at = $4, sort_order = $5, pinned = $6, favorite = $7, ai_permission = $8
+         WHERE id = $9",
         params![
             patch.title.unwrap_or(existing.title),
             next_content,
@@ -569,6 +637,7 @@ fn update_note(
             patch.sort_order.unwrap_or(existing.sort_order),
             patch.pinned.unwrap_or(existing.pinned) as i64,
             patch.favorite.unwrap_or(existing.favorite) as i64,
+            patch.ai_permission.unwrap_or(existing.ai_permission),
             existing.id
         ],
     )?;
@@ -660,10 +729,18 @@ fn create_folder(
         name,
         sort_order: max_order + 1,
         parent_id,
+        ai_permission: "write".to_string(),
     };
     conn.execute(
-        "INSERT INTO folders (id, name, sort_order, parent_id) VALUES ($1, $2, $3, $4)",
-        params![folder.id, folder.name, folder.sort_order, folder.parent_id],
+        "INSERT INTO folders (id, name, sort_order, parent_id, ai_permission)
+         VALUES ($1, $2, $3, $4, $5)",
+        params![
+            folder.id,
+            folder.name,
+            folder.sort_order,
+            folder.parent_id,
+            folder.ai_permission
+        ],
     )?;
     Ok(folder)
 }
@@ -678,6 +755,20 @@ fn rename_folder(
     conn.execute(
         "UPDATE folders SET name = $1 WHERE id = $2",
         params![name, id],
+    )?;
+    Ok(())
+}
+
+#[tauri::command]
+fn update_folder_permission(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    ai_permission: String,
+) -> Result<(), AppError> {
+    let conn = state.db.lock().expect("database mutex poisoned");
+    conn.execute(
+        "UPDATE folders SET ai_permission = $1 WHERE id = $2",
+        params![ai_permission, id],
     )?;
     Ok(())
 }
@@ -1008,6 +1099,7 @@ pub fn run() {
             reorder_note,
             create_folder,
             rename_folder,
+            update_folder_permission,
             delete_folder,
             reorder_folder,
             move_folder,

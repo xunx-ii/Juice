@@ -31,6 +31,14 @@ import { Input } from "@/components/ui/input";
 import { useSyncStore, type SyncSettings } from "@/sync/useSyncStore";
 import { SyncClient } from "@/sync/client";
 import { showToast } from "@/store/useToastStore";
+import {
+  enableEndToEndEncryption,
+  getEncryptionStatus,
+  lockEndToEndEncryption,
+  unlockEndToEndEncryption,
+  updateEndToEndEncryptionKey,
+  type EncryptionStatus,
+} from "@/sync/encryption";
 
 function SyncSettingsSection({
   draft,
@@ -395,6 +403,154 @@ function McpSettingsSection({ settings }: { settings: SyncSettings }) {
   );
 }
 
+function EncryptionSettingsSection() {
+  const schedulePush = useSyncStore((s) => s.schedulePush);
+  const [status, setStatus] = useState<EncryptionStatus>(() => getEncryptionStatus());
+  const [passphrase, setPassphrase] = useState("");
+  const [currentPassphrase, setCurrentPassphrase] = useState("");
+  const [nextPassphrase, setNextPassphrase] = useState("");
+  const [busy, setBusy] = useState<"enable" | "unlock" | "update" | null>(null);
+
+  const refreshStatus = () => setStatus(getEncryptionStatus());
+
+  const runEncryptionAction = async (
+    action: "enable" | "unlock" | "update",
+    task: () => Promise<void>,
+    message: string
+  ) => {
+    setBusy(action);
+    try {
+      await task();
+      refreshStatus();
+      showToast(message, "success", 2000);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "端到端加密操作失败", "destructive");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleEnable = () => {
+    if (!passphrase) {
+      showToast("请输入端到端密钥", "destructive");
+      return;
+    }
+    void runEncryptionAction(
+      "enable",
+      async () => {
+        await enableEndToEndEncryption(passphrase);
+        setPassphrase("");
+        schedulePush();
+      },
+      "端到端加密已开启"
+    );
+  };
+
+  const handleUnlock = () => {
+    if (!passphrase) {
+      showToast("请输入端到端密钥", "destructive");
+      return;
+    }
+    void runEncryptionAction(
+      "unlock",
+      async () => {
+        await unlockEndToEndEncryption(passphrase);
+        setPassphrase("");
+      },
+      "端到端密钥已解锁"
+    );
+  };
+
+  const handleUpdate = () => {
+    if (!currentPassphrase || !nextPassphrase) {
+      showToast("请填写当前密钥和新密钥", "destructive");
+      return;
+    }
+    void runEncryptionAction(
+      "update",
+      async () => {
+        await updateEndToEndEncryptionKey(currentPassphrase, nextPassphrase);
+        setCurrentPassphrase("");
+        setNextPassphrase("");
+        schedulePush();
+      },
+      "端到端密钥已更新"
+    );
+  };
+
+  const handleLock = () => {
+    lockEndToEndEncryption();
+    refreshStatus();
+    showToast("本机密钥已锁定", "success", 2000);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-sm font-medium">端到端加密</div>
+        <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+          {status.enabled ? (status.keyReady ? "已解锁" : "待解锁") : "未开启"}
+        </span>
+      </div>
+
+      {!status.enabled ? (
+        <div className="flex gap-2">
+          <Input
+            type="password"
+            value={passphrase}
+            onChange={(e) => setPassphrase(e.target.value)}
+            placeholder="设置密钥"
+          />
+          <Button size="sm" disabled={busy !== null} onClick={handleEnable}>
+            {busy === "enable" ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+            开启
+          </Button>
+        </div>
+      ) : (
+        <>
+          {!status.keyReady ? (
+            <div className="flex gap-2">
+              <Input
+                type="password"
+                value={passphrase}
+                onChange={(e) => setPassphrase(e.target.value)}
+                placeholder="输入密钥"
+              />
+              <Button size="sm" disabled={busy !== null} onClick={handleUnlock}>
+                {busy === "unlock" ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+                解锁
+              </Button>
+            </div>
+          ) : (
+            <Button size="sm" variant="outline" onClick={handleLock}>
+              锁定
+            </Button>
+          )}
+
+          <div className="grid grid-cols-[1fr_1fr_auto] gap-2">
+            <Input
+              type="password"
+              value={currentPassphrase}
+              onChange={(e) => setCurrentPassphrase(e.target.value)}
+              placeholder="当前密钥"
+            />
+            <Input
+              type="password"
+              value={nextPassphrase}
+              onChange={(e) => setNextPassphrase(e.target.value)}
+              placeholder="新密钥"
+            />
+            <Button size="sm" variant="secondary" disabled={busy !== null} onClick={handleUpdate}>
+              {busy === "update" ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+              更新
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function SettingsDialog({
   open,
   onOpenChange,
@@ -452,6 +608,9 @@ function SettingsDialog({
 
           {/* Sync Settings */}
           <SyncSettingsSection draft={syncDraft} onDraftChange={setSyncDraft} />
+          <Separator />
+
+          <EncryptionSettingsSection />
           <Separator />
 
           <McpSettingsSection settings={syncDraft} />

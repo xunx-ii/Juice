@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -289,14 +289,21 @@ fn tools() -> Value {
 }
 
 async fn list_folders(db: &Database, user_id: &str) -> Result<Value, String> {
+    ensure_mcp_plaintext(db, user_id).await?;
     let folders = db
         .list_folders(user_id)
         .await
         .map_err(|error| format!("database error: {error}"))?;
+    let readable_folders = readable_folder_ids(&folders);
+    let folders = folders
+        .into_iter()
+        .filter(|folder| readable_folders.contains(&folder.id))
+        .collect::<Vec<_>>();
     Ok(json!({ "folders": folders }))
 }
 
 async fn list_notes(db: &Database, user_id: &str, arguments: &Value) -> Result<Value, String> {
+    ensure_mcp_plaintext(db, user_id).await?;
     let folder_id = string_arg(arguments, &["folderId", "folder_id"])
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
@@ -309,20 +316,60 @@ async fn list_notes(db: &Database, user_id: &str, arguments: &Value) -> Result<V
         .unwrap_or(DEFAULT_NOTE_LIST_LIMIT)
         .clamp(1, MAX_NOTE_LIST_LIMIT);
     let offset = i64_arg(arguments, &["offset"]).unwrap_or(0).max(0);
-    let fetch_limit = limit.saturating_add(1);
-    let summaries = db
-        .list_note_summaries(
-            user_id,
-            folder_id,
-            query,
-            fetch_limit,
-            offset,
-            NOTE_PREVIEW_CHARS,
-        )
+    let folders = db
+        .list_folders(user_id)
         .await
         .map_err(|error| format!("database error: {error}"))?;
-    let has_more = summaries.len() > limit as usize;
-    let notes = summaries
+    let readable_folders = readable_folder_ids(&folders);
+    if let Some(folder_id) = folder_id.as_ref() {
+        if !readable_folders.contains(folder_id) {
+            return Ok(json!({
+                "notes": [],
+                "limit": limit,
+                "offset": offset,
+                "hasMore": false,
+                "contentIncluded": false,
+                "includeContentIgnored": include_content_requested
+            }));
+        }
+    }
+
+    let mut db_offset = 0;
+    let mut visible_seen = 0;
+    let mut selected = Vec::new();
+    loop {
+        let batch = db
+            .list_note_summaries(
+                user_id,
+                folder_id.clone(),
+                query.clone(),
+                MAX_NOTE_LIST_LIMIT,
+                db_offset,
+                NOTE_PREVIEW_CHARS,
+            )
+            .await
+            .map_err(|error| format!("database error: {error}"))?;
+        if batch.is_empty() {
+            break;
+        }
+        let batch_len = batch.len() as i64;
+        for summary in batch {
+            if !readable_folders.contains(&summary.folder) || !can_read(&summary.ai_permission) {
+                continue;
+            }
+            if visible_seen >= offset && selected.len() < limit.saturating_add(1) as usize {
+                selected.push(summary);
+            }
+            visible_seen += 1;
+        }
+        if batch_len < MAX_NOTE_LIST_LIMIT || selected.len() > limit as usize {
+            break;
+        }
+        db_offset += batch_len;
+    }
+
+    let has_more = selected.len() > limit as usize;
+    let notes = selected
         .into_iter()
         .take(limit as usize)
         .map(note_summary_value)
@@ -339,12 +386,18 @@ async fn list_notes(db: &Database, user_id: &str, arguments: &Value) -> Result<V
 }
 
 async fn get_note(db: &Database, user_id: &str, arguments: &Value) -> Result<Value, String> {
+    ensure_mcp_plaintext(db, user_id).await?;
     let id = required_string(arguments, &["id"])?;
     let note = db
         .get_note_by_id(user_id, &id)
         .await
         .map_err(|error| format!("database error: {error}"))?
         .ok_or_else(|| format!("note not found: {id}"))?;
+    let folders = db
+        .list_folders(user_id)
+        .await
+        .map_err(|error| format!("database error: {error}"))?;
+    ensure_note_readable_from_folders(&note, &folders)?;
     Ok(json!(note))
 }
 
@@ -358,18 +411,21 @@ fn note_summary_value(note: NoteSummary) -> Value {
         "sortOrder": note.sort_order,
         "pinned": note.pinned,
         "favorite": note.favorite,
-        "contentPreview": note.content_preview
+        "contentPreview": note.content_preview,
+        "aiPermission": note.ai_permission
     })
 }
 
 async fn create_note(db: &Database, user_id: &str, arguments: &Value) -> Result<Value, String> {
     let mut state = get_state(db, user_id).await?;
+    ensure_state_plaintext(&state)?;
     let base_version = state.version;
     let folder_id = ensure_folder(
         &mut state,
         string_arg(arguments, &["folderId", "folder_id"]),
         string_arg(arguments, &["folderName", "folder_name"]),
     )?;
+    ensure_folder_writable(&state, &folder_id)?;
     let sort_order = state
         .notes
         .iter()
@@ -391,6 +447,7 @@ async fn create_note(db: &Database, user_id: &str, arguments: &Value) -> Result<
         sort_order,
         pinned: bool_arg(arguments, &["pinned"]).unwrap_or(false),
         favorite: bool_arg(arguments, &["favorite"]).unwrap_or(false),
+        ai_permission: "write".to_string(),
     };
     state.notes.push(note.clone());
     let version = save_state(db, user_id, state, base_version).await?;
@@ -400,26 +457,26 @@ async fn create_note(db: &Database, user_id: &str, arguments: &Value) -> Result<
 async fn update_note(db: &Database, user_id: &str, arguments: &Value) -> Result<Value, String> {
     let id = required_string(arguments, &["id"])?;
     let mut state = get_state(db, user_id).await?;
+    ensure_state_plaintext(&state)?;
     let base_version = state.version;
+    let note_index = state
+        .notes
+        .iter()
+        .position(|note| note.id == id)
+        .ok_or_else(|| format!("note not found: {id}"))?;
+    ensure_note_writable(&state, &state.notes[note_index])?;
     let folder = if has_any(arguments, &["folderId", "folder_id"]) {
-        ensure_folder(
+        let folder = ensure_folder(
             &mut state,
             string_arg(arguments, &["folderId", "folder_id"]),
             None,
-        )?
+        )?;
+        ensure_folder_writable(&state, &folder)?;
+        folder
     } else {
-        state
-            .notes
-            .iter()
-            .find(|note| note.id == id)
-            .map(|note| note.folder.clone())
-            .ok_or_else(|| format!("note not found: {id}"))?
+        state.notes[note_index].folder.clone()
     };
-    let note = state
-        .notes
-        .iter_mut()
-        .find(|note| note.id == id)
-        .ok_or_else(|| format!("note not found: {id}"))?;
+    let note = &mut state.notes[note_index];
 
     if let Some(title) = string_arg(arguments, &["title"]).filter(|value| !value.trim().is_empty())
     {
@@ -447,7 +504,14 @@ async fn update_note(db: &Database, user_id: &str, arguments: &Value) -> Result<
 async fn delete_note(db: &Database, user_id: &str, arguments: &Value) -> Result<Value, String> {
     let id = required_string(arguments, &["id"])?;
     let mut state = get_state(db, user_id).await?;
+    ensure_state_plaintext(&state)?;
     let base_version = state.version;
+    let note = state
+        .notes
+        .iter()
+        .find(|note| note.id == id)
+        .ok_or_else(|| format!("note not found: {id}"))?;
+    ensure_note_writable(&state, note)?;
     let before = state.notes.len();
     state.notes.retain(|note| note.id != id);
     if state.notes.len() == before {
@@ -506,12 +570,19 @@ fn ensure_folder(
     if let Some(folder) = state
         .folders
         .iter()
-        .find(|folder| folder.parent_id.is_none())
+        .find(|folder| folder.parent_id.is_none() && can_write(&folder.ai_permission))
     {
         return Ok(folder.id.clone());
     }
-    if let Some(folder) = state.folders.first() {
+    if let Some(folder) = state
+        .folders
+        .iter()
+        .find(|folder| can_write(&folder.ai_permission))
+    {
         return Ok(folder.id.clone());
+    }
+    if !state.folders.is_empty() {
+        return Err("没有可写文件夹".to_string());
     }
 
     let folder = new_folder("笔记".to_string(), 0);
@@ -538,7 +609,90 @@ fn new_folder(name: String, sort_order: i64) -> Folder {
         sort_order,
         parent_id: None,
         updated_at: now_millis(),
+        ai_permission: "write".to_string(),
     }
+}
+
+async fn ensure_mcp_plaintext(db: &Database, user_id: &str) -> Result<(), String> {
+    let encrypted = db
+        .encryption_enabled(user_id)
+        .await
+        .map_err(|error| format!("database error: {error}"))?;
+    if encrypted {
+        return Err("笔记已开启端到端加密，MCP 无法读取或修改明文".to_string());
+    }
+    Ok(())
+}
+
+fn ensure_state_plaintext(state: &NotebookState) -> Result<(), String> {
+    if state
+        .encryption
+        .as_ref()
+        .map(|meta| meta.enabled)
+        .unwrap_or(false)
+    {
+        return Err("笔记已开启端到端加密，MCP 无法读取或修改明文".to_string());
+    }
+    Ok(())
+}
+
+fn can_read(permission: &str) -> bool {
+    permission != "none"
+}
+
+fn can_write(permission: &str) -> bool {
+    permission == "write"
+}
+
+fn ensure_folder_writable(state: &NotebookState, folder_id: &str) -> Result<(), String> {
+    if folder_allows(&state.folders, folder_id, can_write) {
+        return Ok(());
+    }
+    Err(format!("folder is not writable: {folder_id}"))
+}
+
+fn ensure_note_readable_from_folders(note: &Note, folders: &[Folder]) -> Result<(), String> {
+    if can_read(&note.ai_permission) && folder_allows(folders, &note.folder, can_read) {
+        return Ok(());
+    }
+    Err(format!("note is not readable: {}", note.id))
+}
+
+fn ensure_note_writable(state: &NotebookState, note: &Note) -> Result<(), String> {
+    if can_write(&note.ai_permission) && folder_allows(&state.folders, &note.folder, can_write) {
+        return Ok(());
+    }
+    Err(format!("note is not writable: {}", note.id))
+}
+
+fn readable_folder_ids(folders: &[Folder]) -> HashSet<String> {
+    folders
+        .iter()
+        .filter(|folder| folder_allows(folders, &folder.id, can_read))
+        .map(|folder| folder.id.clone())
+        .collect()
+}
+
+fn folder_allows(folders: &[Folder], folder_id: &str, predicate: fn(&str) -> bool) -> bool {
+    let by_id = folders
+        .iter()
+        .map(|folder| (folder.id.as_str(), folder))
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashSet::new();
+    let mut current = Some(folder_id);
+    while let Some(id) = current {
+        if !seen.insert(id) {
+            return false;
+        }
+        let Some(folder) = by_id.get(id) else {
+            return true;
+        };
+        if !predicate(&folder.ai_permission) {
+            return false;
+        }
+        current = folder.parent_id.as_deref();
+    }
+    true
 }
 
 async fn require_sync_auth(

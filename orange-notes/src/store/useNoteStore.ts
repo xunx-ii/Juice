@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
-import type { Folder, Note } from "@/types/note";
+import type { AiPermission, Folder, Note } from "@/types/note";
 import type { RemoteNotebookState } from "@/sync/protocol";
+import { decryptNotebookState, encryptNotebookState, getLocalEncryptionMetadata } from "@/sync/encryption";
 import { useSyncStore } from "@/sync/useSyncStore";
 import { notifyNoteImagesDeleted } from "@/lib/noteImageEvents";
 
@@ -16,7 +17,7 @@ interface PersistedData {
 }
 
 type NotePatch = Partial<
-  Pick<Note, "title" | "content" | "folder" | "sortOrder" | "pinned" | "favorite">
+  Pick<Note, "title" | "content" | "folder" | "sortOrder" | "pinned" | "favorite" | "aiPermission">
 >;
 
 interface NoteStore {
@@ -44,6 +45,7 @@ interface NoteStore {
 
   addFolder: (name: string, parentId?: string | null) => Promise<void>;
   renameFolder: (id: string, name: string) => Promise<void>;
+  updateFolderPermission: (id: string, aiPermission: AiPermission) => Promise<void>;
   deleteFolder: (id: string) => Promise<void>;
   reorderFolder: (folderId: string, targetIndex: number) => Promise<void>;
   moveFolderTo: (folderId: string, targetParentId: string | null, targetIndex: number) => Promise<void>;
@@ -54,7 +56,7 @@ interface NoteStore {
   toggleFolder: (folderId: string) => void;
 
   // Sync helpers
-  getSyncPayload: () => RemoteNotebookState;
+  getSyncPayload: () => Promise<RemoteNotebookState>;
   applyRemoteChanges: (state: RemoteNotebookState) => Promise<void>;
   mergeRemoteSnapshot: (state: RemoteNotebookState) => Promise<void>;
   markSynced: (version: number) => Promise<void>;
@@ -122,6 +124,7 @@ function payloadToLocal(state: RemoteNotebookState) {
     name: rf.name,
     sortOrder: rf.sort_order,
     parentId: rf.parent_id,
+    aiPermission: rf.ai_permission ?? "write",
   }));
   const notes: Note[] = state.notes.map((rn) => ({
     id: rn.id,
@@ -133,6 +136,7 @@ function payloadToLocal(state: RemoteNotebookState) {
     sortOrder: rn.sort_order,
     pinned: rn.pinned,
     favorite: rn.favorite,
+    aiPermission: rn.ai_permission ?? "write",
   }));
   return { folders, notes };
 }
@@ -149,6 +153,7 @@ function localToPayload(
       sort_order: f.sortOrder,
       parent_id: f.parentId,
       updated_at: 0,
+      ai_permission: f.aiPermission,
     })),
     notes: notes.map((n) => ({
       id: n.id,
@@ -160,8 +165,10 @@ function localToPayload(
       sort_order: n.sortOrder,
       pinned: n.pinned,
       favorite: n.favorite,
+      ai_permission: n.aiPermission,
     })),
     version,
+    encryption: getLocalEncryptionMetadata(),
   };
 }
 
@@ -181,7 +188,8 @@ function collectChangedNoteIds(previous: Note[], next: Note[]): Set<string> {
       before.folder !== note.folder ||
       before.sortOrder !== note.sortOrder ||
       before.pinned !== note.pinned ||
-      before.favorite !== note.favorite
+      before.favorite !== note.favorite ||
+      before.aiPermission !== note.aiPermission
     ) {
       changed.add(note.id);
     }
@@ -198,7 +206,8 @@ function collectChangedFolderIds(previous: Folder[], next: Folder[]): Set<string
       !before ||
       before.name !== folder.name ||
       before.parentId !== folder.parentId ||
-      before.sortOrder !== folder.sortOrder
+      before.sortOrder !== folder.sortOrder ||
+      before.aiPermission !== folder.aiPermission
     ) {
       changed.add(folder.id);
     }
@@ -383,6 +392,29 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
     }
   },
 
+  updateFolderPermission: async (id: string, aiPermission: AiPermission) => {
+    const previous = get().folders;
+    const wasDirty = get().dirtyFolders.has(id);
+    set((state) => ({
+      folders: previous.map((folder) =>
+        folder.id === id ? { ...folder, aiPermission } : folder
+      ),
+      dirtyFolders: new Set([...state.dirtyFolders, id]),
+    }));
+    try {
+      await invoke("update_folder_permission", { id, aiPermission });
+      await persistSyncMarkers();
+      useSyncStore.getState().schedulePush();
+    } catch (error) {
+      set((state) => {
+        const dirtyFolders = new Set(state.dirtyFolders);
+        if (!wasDirty) dirtyFolders.delete(id);
+        return { folders: previous, dirtyFolders };
+      });
+      setAsyncError(error, "更新文件夹权限失败");
+    }
+  },
+
   deleteFolder: async (id: string) => {
     const previousFolders = get().folders;
     const previousNotes = get().notes;
@@ -514,17 +546,18 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
     });
   },
 
-  getSyncPayload: (): RemoteNotebookState => {
+  getSyncPayload: async (): Promise<RemoteNotebookState> => {
     const { folders, notes } = get();
-    return localToPayload(folders, notes, Date.now());
+    return encryptNotebookState(localToPayload(folders, notes, Date.now()));
   },
 
   applyRemoteChanges: async (state: RemoteNotebookState) => {
-    const { folders, notes } = payloadToLocal(state);
+    const decryptedState = await decryptNotebookState(state);
+    const { folders, notes } = payloadToLocal(decryptedState);
 
     const deletedImages = await invoke<string[]>("apply_remote_notebook", {
-      remoteFolders: state.folders,
-      remoteNotes: state.notes,
+      remoteFolders: decryptedState.folders,
+      remoteNotes: decryptedState.notes,
       version: state.version,
       clearChanges: true,
     });
@@ -545,7 +578,8 @@ export const useNoteStore = create<NoteStore>((set, get) => ({
   },
 
   mergeRemoteSnapshot: async (state: RemoteNotebookState) => {
-    const remote = payloadToLocal(state);
+    const decryptedState = await decryptNotebookState(state);
+    const remote = payloadToLocal(decryptedState);
     const local = get();
     const foldersById = new Map<string, Folder>();
     for (const folder of remote.folders) foldersById.set(folder.id, folder);

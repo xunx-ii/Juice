@@ -3,6 +3,10 @@ use serde::Serialize;
 use std::collections::HashSet;
 use tokio::sync::Mutex;
 
+fn default_ai_permission() -> String {
+    "write".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Folder {
     pub id: String,
@@ -10,6 +14,8 @@ pub struct Folder {
     pub sort_order: i64,
     pub parent_id: Option<String>,
     pub updated_at: i64,
+    #[serde(default = "default_ai_permission")]
+    pub ai_permission: String,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -23,6 +29,8 @@ pub struct Note {
     pub sort_order: i64,
     pub pinned: bool,
     pub favorite: bool,
+    #[serde(default = "default_ai_permission")]
+    pub ai_permission: String,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -36,6 +44,19 @@ pub struct NoteSummary {
     pub pinned: bool,
     pub favorite: bool,
     pub content_preview: String,
+    pub ai_permission: String,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct EncryptionMeta {
+    pub enabled: bool,
+    pub version: i64,
+    pub algorithm: String,
+    pub kdf: String,
+    pub salt: String,
+    pub iterations: i64,
+    pub key_check_iv: String,
+    pub key_check: String,
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -43,6 +64,8 @@ pub struct NotebookState {
     pub folders: Vec<Folder>,
     pub notes: Vec<Note>,
     pub version: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<EncryptionMeta>,
 }
 
 pub struct Database {
@@ -69,6 +92,13 @@ fn extract_image_file_names(content: &str) -> HashSet<String> {
         rest = &after_start[end + 2..];
     }
     names
+}
+
+fn normalize_ai_permission(permission: &str) -> &str {
+    match permission {
+        "read" | "write" | "none" => permission,
+        _ => "write",
+    }
 }
 
 impl Database {
@@ -225,6 +255,10 @@ impl Database {
                 "DELETE FROM sync_meta WHERE user_id = ?1",
                 params![username.clone()],
             )?;
+            conn.execute(
+                "DELETE FROM encryption_meta WHERE user_id = ?1",
+                params![username.clone()],
+            )?;
             let deleted =
                 conn.execute("DELETE FROM users WHERE username = ?1", params![username])?;
             Ok(deleted > 0)
@@ -248,9 +282,31 @@ impl Database {
                 .optional()?
                 .unwrap_or(0);
 
+            let encryption = conn
+                .query_row(
+                    "SELECT enabled, version, algorithm, kdf, salt, iterations, key_check_iv, key_check
+                     FROM encryption_meta
+                     WHERE user_id = ?1",
+                    params![user_id.clone()],
+                    |row| {
+                        Ok(EncryptionMeta {
+                            enabled: row.get::<_, i64>(0)? != 0,
+                            version: row.get(1)?,
+                            algorithm: row.get(2)?,
+                            kdf: row.get(3)?,
+                            salt: row.get(4)?,
+                            iterations: row.get(5)?,
+                            key_check_iv: row.get(6)?,
+                            key_check: row.get(7)?,
+                        })
+                    },
+                )
+                .optional()?
+                .filter(|meta| meta.enabled);
+
             let folders = {
                 let mut stmt = conn.prepare(
-                "SELECT id, name, sort_order, parent_id, updated_at FROM folders WHERE user_id = ?1 ORDER BY sort_order ASC",
+                "SELECT id, name, sort_order, parent_id, updated_at, ai_permission FROM folders WHERE user_id = ?1 ORDER BY sort_order ASC",
                 )?;
                 let rows = stmt.query_map(params![user_id.clone()], |row| {
                     Ok(Folder {
@@ -259,6 +315,7 @@ impl Database {
                         sort_order: row.get(2)?,
                         parent_id: row.get(3)?,
                         updated_at: row.get(4)?,
+                        ai_permission: row.get(5)?,
                     })
                 })?;
                 rows.collect::<Result<Vec<_>, _>>()?
@@ -266,7 +323,7 @@ impl Database {
 
             let notes = {
                 let mut stmt = conn.prepare(
-                    "SELECT id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite FROM notes WHERE user_id = ?1 ORDER BY folder ASC, sort_order ASC",
+                    "SELECT id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite, ai_permission FROM notes WHERE user_id = ?1 ORDER BY folder ASC, sort_order ASC",
                 )?;
                 let rows = stmt.query_map(params![user_id], |row| {
                     Ok(Note {
@@ -279,6 +336,7 @@ impl Database {
                         sort_order: row.get(6)?,
                         pinned: row.get::<_, i64>(7)? != 0,
                         favorite: row.get::<_, i64>(8)? != 0,
+                        ai_permission: row.get(9)?,
                     })
                 })?;
                 rows.collect::<Result<Vec<_>, _>>()?
@@ -288,15 +346,32 @@ impl Database {
                 folders,
                 notes,
                 version,
+                encryption,
             })
         }).await
+    }
+
+    pub async fn encryption_enabled(&self, user_id: &str) -> Result<bool, rusqlite::Error> {
+        let user_id = user_id.to_string();
+        self.conn(move |conn| {
+            let enabled = conn
+                .query_row(
+                    "SELECT enabled FROM encryption_meta WHERE user_id = ?1",
+                    params![user_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            Ok(enabled != 0)
+        })
+        .await
     }
 
     pub async fn list_folders(&self, user_id: &str) -> Result<Vec<Folder>, rusqlite::Error> {
         let user_id = user_id.to_string();
         self.conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, sort_order, parent_id, updated_at
+                "SELECT id, name, sort_order, parent_id, updated_at, ai_permission
                  FROM folders
                  WHERE user_id = ?1
                  ORDER BY sort_order ASC",
@@ -308,6 +383,7 @@ impl Database {
                     sort_order: row.get(2)?,
                     parent_id: row.get(3)?,
                     updated_at: row.get(4)?,
+                    ai_permission: row.get(5)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()
@@ -338,16 +414,18 @@ impl Database {
                     pinned: row.get::<_, i64>(6)? != 0,
                     favorite: row.get::<_, i64>(7)? != 0,
                     content_preview: row.get(8)?,
+                    ai_permission: row.get(9)?,
                 })
             };
 
             match (folder_id, query) {
                 (Some(folder_id), Some(query)) => {
                     let mut stmt = conn.prepare(
-                        "SELECT id, title, folder, created_at, updated_at, sort_order, pinned, favorite, substr(content, 1, ?3)
-                         FROM notes
-                         WHERE user_id = ?1 AND folder = ?2 AND (lower(title) LIKE ?4 OR lower(content) LIKE ?4)
-                         ORDER BY folder ASC, sort_order ASC
+                        "SELECT n.id, n.title, n.folder, n.created_at, n.updated_at, n.sort_order, n.pinned, n.favorite, substr(n.content, 1, ?3), n.ai_permission
+                         FROM notes n
+                         JOIN folders f ON f.user_id = n.user_id AND f.id = n.folder
+                         WHERE n.user_id = ?1 AND n.folder = ?2 AND n.ai_permission != 'none' AND f.ai_permission != 'none' AND (lower(n.title) LIKE ?4 OR lower(n.content) LIKE ?4)
+                         ORDER BY n.folder ASC, n.sort_order ASC
                          LIMIT ?5 OFFSET ?6",
                     )?;
                     let rows = stmt.query_map(
@@ -358,10 +436,11 @@ impl Database {
                 }
                 (Some(folder_id), None) => {
                     let mut stmt = conn.prepare(
-                        "SELECT id, title, folder, created_at, updated_at, sort_order, pinned, favorite, substr(content, 1, ?3)
-                         FROM notes
-                         WHERE user_id = ?1 AND folder = ?2
-                         ORDER BY folder ASC, sort_order ASC
+                        "SELECT n.id, n.title, n.folder, n.created_at, n.updated_at, n.sort_order, n.pinned, n.favorite, substr(n.content, 1, ?3), n.ai_permission
+                         FROM notes n
+                         JOIN folders f ON f.user_id = n.user_id AND f.id = n.folder
+                         WHERE n.user_id = ?1 AND n.folder = ?2 AND n.ai_permission != 'none' AND f.ai_permission != 'none'
+                         ORDER BY n.folder ASC, n.sort_order ASC
                          LIMIT ?4 OFFSET ?5",
                     )?;
                     let rows = stmt.query_map(
@@ -372,10 +451,11 @@ impl Database {
                 }
                 (None, Some(query)) => {
                     let mut stmt = conn.prepare(
-                        "SELECT id, title, folder, created_at, updated_at, sort_order, pinned, favorite, substr(content, 1, ?2)
-                         FROM notes
-                         WHERE user_id = ?1 AND (lower(title) LIKE ?3 OR lower(content) LIKE ?3)
-                         ORDER BY folder ASC, sort_order ASC
+                        "SELECT n.id, n.title, n.folder, n.created_at, n.updated_at, n.sort_order, n.pinned, n.favorite, substr(n.content, 1, ?2), n.ai_permission
+                         FROM notes n
+                         JOIN folders f ON f.user_id = n.user_id AND f.id = n.folder
+                         WHERE n.user_id = ?1 AND n.ai_permission != 'none' AND f.ai_permission != 'none' AND (lower(n.title) LIKE ?3 OR lower(n.content) LIKE ?3)
+                         ORDER BY n.folder ASC, n.sort_order ASC
                          LIMIT ?4 OFFSET ?5",
                     )?;
                     let rows = stmt.query_map(
@@ -386,10 +466,11 @@ impl Database {
                 }
                 (None, None) => {
                     let mut stmt = conn.prepare(
-                        "SELECT id, title, folder, created_at, updated_at, sort_order, pinned, favorite, substr(content, 1, ?2)
-                         FROM notes
-                         WHERE user_id = ?1
-                         ORDER BY folder ASC, sort_order ASC
+                        "SELECT n.id, n.title, n.folder, n.created_at, n.updated_at, n.sort_order, n.pinned, n.favorite, substr(n.content, 1, ?2), n.ai_permission
+                         FROM notes n
+                         JOIN folders f ON f.user_id = n.user_id AND f.id = n.folder
+                         WHERE n.user_id = ?1 AND n.ai_permission != 'none' AND f.ai_permission != 'none'
+                         ORDER BY n.folder ASC, n.sort_order ASC
                          LIMIT ?3 OFFSET ?4",
                     )?;
                     let rows =
@@ -410,7 +491,7 @@ impl Database {
         let note_id = note_id.to_string();
         self.conn(move |conn| {
             conn.query_row(
-                "SELECT id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite
+                "SELECT id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite, ai_permission
                  FROM notes
                  WHERE user_id = ?1 AND id = ?2",
                 params![user_id, note_id],
@@ -425,6 +506,7 @@ impl Database {
                         sort_order: row.get(6)?,
                         pinned: row.get::<_, i64>(7)? != 0,
                         favorite: row.get::<_, i64>(8)? != 0,
+                        ai_permission: row.get(9)?,
                     })
                 },
             )
@@ -469,6 +551,8 @@ impl Database {
 
             tx.execute("DELETE FROM notes WHERE user_id = ?1", params![user_id.clone()])?;
             tx.execute("DELETE FROM folders WHERE user_id = ?1", params![user_id.clone()])?;
+            let encryption = state.encryption.clone().filter(|meta| meta.enabled);
+            let encryption_enabled = encryption.is_some();
 
             let referenced_attachments = state
                 .notes
@@ -478,8 +562,8 @@ impl Database {
 
             for folder in state.folders {
                 tx.execute(
-                    "INSERT INTO folders (id, name, sort_order, parent_id, updated_at, user_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT INTO folders (id, name, sort_order, parent_id, updated_at, user_id, ai_permission)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     params![
                         folder.id,
                         folder.name,
@@ -487,14 +571,15 @@ impl Database {
                         folder.parent_id,
                         folder.updated_at,
                         user_id.clone(),
+                        normalize_ai_permission(&folder.ai_permission),
                     ],
                 )?;
             }
 
             for note in state.notes {
                 tx.execute(
-                    "INSERT INTO notes (id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite, user_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    "INSERT INTO notes (id, title, content, folder, created_at, updated_at, sort_order, pinned, favorite, user_id, ai_permission)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         note.id,
                         note.title,
@@ -506,6 +591,7 @@ impl Database {
                         note.pinned as i64,
                         note.favorite as i64,
                         user_id.clone(),
+                        normalize_ai_permission(&note.ai_permission),
                     ],
                 )?;
             }
@@ -519,12 +605,44 @@ impl Database {
                 file_names
             };
             for file_name in existing_attachments {
-                if referenced_attachments.contains(&file_name) {
+                if encryption_enabled || referenced_attachments.contains(&file_name) {
                     continue;
                 }
                 tx.execute(
                     "DELETE FROM attachments WHERE user_id = ?1 AND file_name = ?2",
                     params![user_id.clone(), file_name],
+                )?;
+            }
+
+            if let Some(encryption) = encryption {
+                tx.execute(
+                    "INSERT INTO encryption_meta (user_id, enabled, version, algorithm, kdf, salt, iterations, key_check_iv, key_check)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT(user_id) DO UPDATE SET
+                       enabled = excluded.enabled,
+                       version = excluded.version,
+                       algorithm = excluded.algorithm,
+                       kdf = excluded.kdf,
+                       salt = excluded.salt,
+                       iterations = excluded.iterations,
+                       key_check_iv = excluded.key_check_iv,
+                       key_check = excluded.key_check",
+                    params![
+                        user_id.clone(),
+                        encryption.enabled as i64,
+                        encryption.version,
+                        encryption.algorithm,
+                        encryption.kdf,
+                        encryption.salt,
+                        encryption.iterations,
+                        encryption.key_check_iv,
+                        encryption.key_check,
+                    ],
+                )?;
+            } else {
+                tx.execute(
+                    "DELETE FROM encryption_meta WHERE user_id = ?1",
+                    params![user_id.clone()],
                 )?;
             }
 
@@ -594,6 +712,25 @@ impl Database {
     ) -> Result<Vec<(String, String)>, rusqlite::Error> {
         let user_id = user_id.to_string();
         self.conn(move |conn| {
+            let encryption_enabled = conn
+                .query_row(
+                    "SELECT enabled FROM encryption_meta WHERE user_id = ?1",
+                    params![user_id.clone()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .unwrap_or(0)
+                != 0;
+            if encryption_enabled {
+                let mut stmt = conn.prepare(
+                    "SELECT file_name, mime FROM attachments WHERE user_id = ?1 ORDER BY file_name ASC",
+                )?;
+                let rows = stmt.query_map(params![user_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                return rows.collect::<Result<Vec<_>, _>>();
+            }
+
             let referenced = {
                 let mut stmt = conn.prepare("SELECT content FROM notes WHERE user_id = ?1")?;
                 let contents = stmt
@@ -678,6 +815,7 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           sort_order INTEGER NOT NULL,
           parent_id TEXT,
           updated_at INTEGER NOT NULL,
+          ai_permission TEXT NOT NULL DEFAULT 'write',
           user_id TEXT NOT NULL DEFAULT ''
         );
 
@@ -691,6 +829,7 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           sort_order INTEGER NOT NULL,
           pinned INTEGER NOT NULL DEFAULT 0,
           favorite INTEGER NOT NULL DEFAULT 0,
+          ai_permission TEXT NOT NULL DEFAULT 'write',
           user_id TEXT NOT NULL DEFAULT '',
           FOREIGN KEY(folder) REFERENCES folders(id) ON DELETE CASCADE
         );
@@ -709,6 +848,19 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
           version INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS encryption_meta (
+          user_id TEXT PRIMARY KEY,
+          enabled INTEGER NOT NULL,
+          version INTEGER NOT NULL,
+          algorithm TEXT NOT NULL,
+          kdf TEXT NOT NULL,
+          salt TEXT NOT NULL,
+          iterations INTEGER NOT NULL,
+          key_check_iv TEXT NOT NULL,
+          key_check TEXT NOT NULL,
+          FOREIGN KEY(user_id) REFERENCES users(username) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS mcp_tokens (
           user_id TEXT PRIMARY KEY,
           token TEXT NOT NULL UNIQUE,
@@ -723,5 +875,31 @@ fn init_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_notes_user_updated
           ON notes(user_id, updated_at);
     ",
-    )
+    )?;
+    ensure_text_column(conn, "folders", "ai_permission", "'write'")?;
+    ensure_text_column(conn, "notes", "ai_permission", "'write'")?;
+    Ok(())
+}
+
+fn ensure_text_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    default_value: &str,
+) -> Result<(), rusqlite::Error> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .any(|name| name == column);
+    if !exists {
+        conn.execute(
+            &format!(
+                "ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT {default_value}"
+            ),
+            [],
+        )?;
+    }
+    Ok(())
 }

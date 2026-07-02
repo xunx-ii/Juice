@@ -1,3 +1,5 @@
+export type AiPermission = "read" | "write" | "none";
+
 export interface Note {
   id: string;
   title: string;
@@ -8,6 +10,7 @@ export interface Note {
   sortOrder: number;
   pinned: boolean;
   favorite: boolean;
+  aiPermission: AiPermission;
 }
 
 export interface Folder {
@@ -15,6 +18,7 @@ export interface Folder {
   name: string;
   sortOrder: number;
   parentId: string | null;
+  aiPermission: AiPermission;
 }
 
 /** A fully-resolved node in the sidebar tree. Folders and notes share this shape. */
@@ -29,6 +33,7 @@ export interface TreeNode {
   isExpanded?: boolean;
   isActive?: boolean;
   isPinned?: boolean;
+  aiPermission?: AiPermission;
 
   /** Tree-walk state used by drag & drop. */
   /** When the pointer is hovering to drop "before" this item. */
