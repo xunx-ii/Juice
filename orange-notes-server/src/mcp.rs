@@ -1090,6 +1090,9 @@ fn verify_client_key_check(meta: &EncryptionMeta, crypto: &McpCrypto) -> Result<
 }
 
 fn verify_mcp_check_payload(payload: &str, crypto: &McpCrypto) -> Result<(), String> {
+    if !payload.starts_with(PAYLOAD_PREFIX) {
+        return Err("端到端密钥校验数据格式错误".to_string());
+    }
     let text = crypto.decrypt_text(payload)?;
     if text == MCP_KEY_CHECK_TEXT {
         Ok(())

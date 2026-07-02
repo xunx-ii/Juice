@@ -11,7 +11,6 @@ export interface RemoteEncryptionMeta {
   iterations: number;
   key_check_iv: string;
   key_check: string;
-  mcp_check?: string | null;
 }
 
 export function isRemoteEncryptionMeta(value: unknown): value is RemoteEncryptionMeta {

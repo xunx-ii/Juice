@@ -33,10 +33,12 @@ import { SyncClient } from "@/sync/client";
 import { showToast } from "@/store/useToastStore";
 import {
   createRemoteKeyCheckPayload,
+  createEncryptionSnapshot,
   enableEndToEndEncryption,
   getEncryptionStatus,
   getLocalEncryptionMetadata,
   lockEndToEndEncryption,
+  restoreEncryptionSnapshot,
   unlockEndToEndEncryption,
   updateEndToEndEncryptionKey,
   type EncryptionStatus,
@@ -300,6 +302,43 @@ async function storeRemoteEncryptionCheck(settings: SyncSettings, passphrase: st
   if (!response.ok) throw new Error(await response.text());
 }
 
+async function verifyRemoteEncryptionCheck(settings: SyncSettings, passphrase: string) {
+  if (!hasCompleteSyncSettings(settings)) {
+    throw new Error("请先配置同步服务器");
+  }
+  const httpBase = SyncClient.httpBaseUrl(settings.address.trim());
+  const response = await fetch(
+    `${httpBase}/api/sync/e2ee-check/${encodeURIComponent(settings.username.trim())}/verify`,
+    {
+      method: "POST",
+      headers: {
+        ...syncAuthHeaders({ username: settings.username.trim(), password: settings.password }),
+        "x-orange-notes-e2ee-key": encodeURIComponent(passphrase),
+      },
+    }
+  );
+  if (!response.ok) throw new Error(await response.text());
+}
+
+async function syncEncryptionChange(
+  settings: SyncSettings,
+  passphrase: string,
+  changeLocalState: () => Promise<void>
+) {
+  const snapshot = createEncryptionSnapshot();
+  let remoteStateChanged = false;
+  try {
+    await changeLocalState();
+    await pushEncryptionStateOrThrow();
+    remoteStateChanged = true;
+    await storeRemoteEncryptionCheck(settings, passphrase);
+    await verifyRemoteEncryptionCheck(settings, passphrase);
+  } catch (error) {
+    if (!remoteStateChanged) restoreEncryptionSnapshot(snapshot);
+    throw error;
+  }
+}
+
 async function pushEncryptionStateOrThrow() {
   const store = useSyncStore.getState();
   if (store.syncing) throw new Error("同步进行中，请稍后再试");
@@ -465,6 +504,7 @@ function EncryptionSettingsSection() {
       refreshStatus();
       showToast(message, "success", 2000);
     } catch (error) {
+      refreshStatus();
       showToast(error instanceof Error ? error.message : "端到端加密操作失败", "destructive");
     } finally {
       setBusy(null);
@@ -480,9 +520,9 @@ function EncryptionSettingsSection() {
       "enable",
       async () => {
         if (!hasCompleteSyncSettings(syncSettings)) throw new Error("请先配置同步服务器");
-        await enableEndToEndEncryption(passphrase);
-        await pushEncryptionStateOrThrow();
-        await storeRemoteEncryptionCheck(syncSettings, passphrase);
+        await syncEncryptionChange(syncSettings, passphrase, () =>
+          enableEndToEndEncryption(passphrase)
+        );
         setPassphrase("");
       },
       "端到端加密已开启"
@@ -513,9 +553,9 @@ function EncryptionSettingsSection() {
       "update",
       async () => {
         if (!hasCompleteSyncSettings(syncSettings)) throw new Error("请先配置同步服务器");
-        await updateEndToEndEncryptionKey(currentPassphrase, nextPassphrase);
-        await pushEncryptionStateOrThrow();
-        await storeRemoteEncryptionCheck(syncSettings, nextPassphrase);
+        await syncEncryptionChange(syncSettings, nextPassphrase, () =>
+          updateEndToEndEncryptionKey(currentPassphrase, nextPassphrase)
+        );
         setCurrentPassphrase("");
         setNextPassphrase("");
       },

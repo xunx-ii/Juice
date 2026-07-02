@@ -7,6 +7,7 @@ const MCP_KEY_CHECK_TEXT = "hello";
 const DEFAULT_ITERATIONS = 310_000;
 
 type EncryptionSettings = RemoteEncryptionMeta;
+type StoredEncryptionSettings = EncryptionSettings & { updated_at?: number };
 
 let activeKey: CryptoKey | null = null;
 let activeKeyFingerprint = "";
@@ -15,6 +16,12 @@ export interface EncryptionStatus {
   enabled: boolean;
   keyReady: boolean;
   updatedAt: number | null;
+}
+
+export interface EncryptionStateSnapshot {
+  settings: StoredEncryptionSettings | null;
+  activeKey: CryptoKey | null;
+  activeKeyFingerprint: string;
 }
 
 function encodeBase64(bytes: Uint8Array): string {
@@ -44,7 +51,7 @@ function settingsFingerprint(settings: Pick<EncryptionSettings, "salt" | "iterat
   return `${settings.salt}:${settings.iterations}:${settings.key_check_iv}:${settings.key_check}`;
 }
 
-function loadSettings(): (EncryptionSettings & { updated_at?: number }) | null {
+function loadSettings(): StoredEncryptionSettings | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
@@ -66,8 +73,8 @@ function loadSettings(): (EncryptionSettings & { updated_at?: number }) | null {
   }
 }
 
-function saveSettings(settings: EncryptionSettings) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...settings, updated_at: Date.now() }));
+function saveSettings(settings: EncryptionSettings, updatedAt = Date.now()) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...settings, updated_at: updatedAt }));
 }
 
 async function deriveKey(passphrase: string, settings: Pick<EncryptionSettings, "salt" | "iterations">) {
@@ -157,6 +164,24 @@ export function getLocalEncryptionMetadata(): RemoteEncryptionMeta | null {
     key_check_iv: settings.key_check_iv,
     key_check: settings.key_check,
   };
+}
+
+export function createEncryptionSnapshot(): EncryptionStateSnapshot {
+  return {
+    settings: loadSettings(),
+    activeKey,
+    activeKeyFingerprint,
+  };
+}
+
+export function restoreEncryptionSnapshot(snapshot: EncryptionStateSnapshot) {
+  if (snapshot.settings) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot.settings));
+  } else {
+    localStorage.removeItem(STORAGE_KEY);
+  }
+  activeKey = snapshot.activeKey;
+  activeKeyFingerprint = snapshot.activeKeyFingerprint;
 }
 
 export async function createRemoteKeyCheckPayload(): Promise<string> {

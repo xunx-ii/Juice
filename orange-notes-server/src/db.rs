@@ -57,7 +57,7 @@ pub struct EncryptionMeta {
     pub iterations: i64,
     pub key_check_iv: String,
     pub key_check: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub mcp_check: Option<String>,
 }
 
